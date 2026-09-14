@@ -42,17 +42,20 @@ const ENUM_PARAMS = {
   command: ['LOAD', 'RESUME', 'STOP', 'CLEAR'],
   model: [
     'lerobot:act',
+    'vitacformer:vitacformer',
     'lerobot:smolvla',
     'lerobot:xvla',
     'lerobot:pi0',
     'lerobot:pi05',
     'lerobot:diffusion',
+    'lerobot:trex',
+    'lerobot:fastwam',
     'groot:n17',
     'groot',
     'lerobot',
   ],
   inference_mode: ['simulation', 'robot'],
-  action_request_mode: ['async', 'sync'],
+  action_request_mode: ['async', 'async_ordered', 'sync', 'sync_step'],
   acceleration_mode: ['pytorch', 'tensorrt_dit'],
 };
 
@@ -114,9 +117,11 @@ export default function BTParamPanel({ nodes, selectedNodeId, onParamChange, onN
 
   const policyBrowserPath = useMemo(() => {
     const model = String(localParams.model || '').toLowerCase();
-    return model.startsWith('groot')
-      ? DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH
-      : DEFAULT_PATHS.LEROBOT_CHECKPOINTS_PATH;
+    if (model.startsWith('groot')) return DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH;
+    if (model.includes('vitacformer')) {
+      return DEFAULT_PATHS.VITACFORMER_CHECKPOINTS_PATH;
+    }
+    return DEFAULT_PATHS.LEROBOT_CHECKPOINTS_PATH;
   }, [localParams.model]);
 
   // Reset local state only when switching to a different node

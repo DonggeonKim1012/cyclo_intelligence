@@ -29,6 +29,7 @@ import {
 } from 'react-icons/md';
 import FileBrowserModal from './FileBrowserModal';
 import InferenceModelSelector from './InferenceModelSelector';
+import InferenceModelSwitch from './InferenceModelSwitch';
 import PolicyBackendControl from './PolicyBackendControl';
 import TrtEngineControl from './TrtEngineControl';
 import Tooltip from './Tooltip';
@@ -45,7 +46,10 @@ import {
   setInferenceTaskInfo,
 } from '../features/tasks/taskSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
-import { requiresInstruction } from '../constants/policyCapabilities';
+import {
+  requiredActionRequestMode,
+  requiresInstruction,
+} from '../constants/policyCapabilities';
 import { getInferenceTaskInfoKey } from '../utils/taskInfoSync';
 
 const AUTO_SYNC_DELAY_MS = 700;
@@ -57,6 +61,7 @@ const InferencePanel = () => {
   const taskInfoSync = useSelector((state) => state.tasks.inferenceTaskInfoSync);
   const robotType = useSelector((state) => state.tasks.robotType);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
+  const isSwitchingModel = useSelector((state) => Boolean(state.tasks.inferenceModelSwitch?.busy || state.tasks.inferenceModelSwitch?.preloadBusy));
   const showInstruction = requiresInstruction(info.serviceType, info.policyType);
 
   const [isTaskStatusPaused, setIsTaskStatusPaused] = useState(false);
@@ -70,15 +75,21 @@ const InferencePanel = () => {
     inferenceStatus.inferencePhase === InferencePhase.INFERENCING;
   const inferenceMode = info.inferenceMode || 'simulation';
   const isRobotMode = inferenceMode === 'robot';
-  const actionRequestMode =
-    String(info.actionRequestMode || '').trim().toLowerCase() === 'sync'
-      ? 'sync'
-      : 'async';
+  const actionRequestModeRaw = String(
+    info.actionRequestMode || ''
+  ).trim().toLowerCase();
+  const actionRequestMode = actionRequestModeRaw.startsWith('sync')
+    ? 'sync'
+    : 'async';
+  const lockedActionRequestMode = requiredActionRequestMode(
+    info.serviceType,
+    info.policyType
+  );
   const isGrootModel = info.serviceType === 'groot';
   const isTensorRtEnabled = info.accelerationMode === 'tensorrt_dit';
   const trtTaskInstruction = (info.taskInstruction?.[0] || '').trim();
   const isModeSwitchLocked =
-    inferenceStatus.inferencePhase === InferencePhase.LOADING;
+    isSwitchingModel || inferenceStatus.inferencePhase === InferencePhase.LOADING;
   const isModelActive = [
     InferencePhase.INFERENCING,
     InferencePhase.PAUSED,
@@ -238,6 +249,8 @@ const InferencePanel = () => {
   const policyBrowserPath =
     info.serviceType === 'groot'
       ? DEFAULT_PATHS.GROOT_CHECKPOINTS_PATH
+      : info.serviceType === 'vitacformer'
+        ? DEFAULT_PATHS.VITACFORMER_CHECKPOINTS_PATH
       : DEFAULT_PATHS.LEROBOT_CHECKPOINTS_PATH;
 
   // Update isEditable state when the disabled prop changes
@@ -366,7 +379,7 @@ const InferencePanel = () => {
     }
   );
 
-  const actionModeButtonClass = (active) => clsx(
+  const actionModeButtonClass = (active, locked = false) => clsx(
     'h-8',
     'min-w-0',
     'px-2',
@@ -385,8 +398,8 @@ const InferencePanel = () => {
       ? 'bg-blue-500 text-white focus:ring-blue-300'
       : 'bg-white text-gray-600 hover:bg-gray-50 focus:ring-gray-300 border border-gray-200',
     {
-      'opacity-50 cursor-not-allowed': !isEditable,
-      'cursor-pointer': isEditable,
+      'opacity-50 cursor-not-allowed': !isEditable || locked,
+      'cursor-pointer': isEditable && !locked,
     }
   );
 
@@ -518,6 +531,15 @@ const InferencePanel = () => {
         </div>
       </div>
 
+      {info.serviceType === 'vitacformer' && info.policyType === 'vitacformer' && (
+        <div className="mb-2.5 ml-28 text-xs text-gray-500">
+          Select the run folder to load checkpoints/best_model.pt automatically.
+          Selecting checkpoints/&lt;step&gt; loads that step&apos;s model.pt.
+        </div>
+      )}
+
+      <InferenceModelSwitch />
+
       {isGrootModel && (
         <>
           <div className={clsx('flex', 'items-center', 'mb-2.5')}>
@@ -561,7 +583,16 @@ const InferencePanel = () => {
 
       <div className={clsx('flex', 'items-center', 'mb-2.5')}>
         <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
-          <Tooltip content="Choose when the next action chunk is requested." position="bottom">
+          <Tooltip
+            content={lockedActionRequestMode
+              ? lockedActionRequestMode === 'async_ordered'
+                ? 'Tactile ACT uses four-step closed-loop replanning with time-aligned overlap ensembling and continuous 100 Hz output.'
+                : info.serviceType === 'vitacformer' && info.policyType === 'vitacformer'
+                  ? 'ViTacFormer uses latency-aligned asynchronous replanning for its saved 30 Hz action trajectory.'
+                : 'Vanilla ACT requires sequential Sync requests to preserve n_action_steps execution.'
+              : 'Choose when the next action chunk is requested.'}
+            position="bottom"
+          >
             <MdInfoOutline className="text-gray-400 hover:text-gray-600 cursor-help" size={14} />
           </Tooltip>
           <span>Action Request</span>
@@ -570,8 +601,11 @@ const InferencePanel = () => {
           <button
             type="button"
             onClick={() => handleChange('actionRequestMode', 'async')}
-            disabled={!isEditable}
-            className={actionModeButtonClass(actionRequestMode !== 'sync')}
+            disabled={!isEditable || Boolean(lockedActionRequestMode)}
+            className={actionModeButtonClass(
+              actionRequestMode !== 'sync',
+              Boolean(lockedActionRequestMode)
+            )}
             aria-label="Use async action requests"
             title="Async"
           >
@@ -581,8 +615,11 @@ const InferencePanel = () => {
           <button
             type="button"
             onClick={() => handleChange('actionRequestMode', 'sync')}
-            disabled={!isEditable}
-            className={actionModeButtonClass(actionRequestMode === 'sync')}
+            disabled={!isEditable || Boolean(lockedActionRequestMode)}
+            className={actionModeButtonClass(
+              actionRequestMode === 'sync',
+              Boolean(lockedActionRequestMode)
+            )}
             aria-label="Use sync action requests"
             title="Sync"
           >

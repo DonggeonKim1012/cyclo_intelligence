@@ -16,8 +16,11 @@
 #
 # Author: Dongyun Kim, Seongwoo Kim, Kiwoong Park
 
+import json
 import os
 import threading
+import time
+import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 from interfaces.msg import (
@@ -43,6 +46,11 @@ from rclpy.qos import (
     ReliabilityPolicy
 )
 from std_msgs.msg import Empty, String
+
+
+_HEAD_CAMERA_PROFILE_TOPIC = '/ffw/head_camera_profile'
+_HEAD_CAMERA_NAMES = {'cam_left_head', 'cam_right_head'}
+_INITIAL_POSE_STATUS_TOPIC = '/ffw/initial_pose_return/status'
 
 
 class Communicator:
@@ -97,6 +105,19 @@ class Communicator:
             robot_schema.get_camera_info_topics(robot_section)
         )
         self._mcap_topics = robot_schema.get_mcap_record_topics(robot_section)
+        self._head_camera_profile = ''
+        self._head_camera_profile_sub = None
+        self._initial_pose_lock = threading.Lock()
+        self._initial_pose_request_id = None
+        self._initial_pose_state = 'idle'
+        self._initial_pose_message = ''
+        self._initial_pose_requested_at = 0.0
+        self._initial_pose_status_sub = self.node.create_subscription(
+            String, _INITIAL_POSE_STATUS_TOPIC,
+            self._initial_pose_status_callback,
+            QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
 
         # Initialize DataEditor for dataset editing
         self.data_editor = DataEditor()
@@ -108,6 +129,7 @@ class Communicator:
         node.get_logger().info(f'Camera info topics: {self.camera_info_topics}')
         node.get_logger().info(f'Rosbag extra topics: {self.rosbag_extra_topics}')
         node.get_logger().info(f'MCAP topics (v2): {self._mcap_topics}')
+        self._subscribe_head_camera_profile()
 
         self.heartbeat_qos_profile = QoSProfile(
             depth=1,
@@ -172,6 +194,16 @@ class Communicator:
         """Initialize publishers."""
         self.node.get_logger().info('Initializing publishers...')
 
+        joystick_topics = robot_schema.get_joystick_topics(self.robot_section)
+        trigger_topic = joystick_topics.get('trigger_topic', '')
+        self.initial_pose_trigger_publisher = None
+        if trigger_topic:
+            self.initial_pose_trigger_publisher = self.node.create_publisher(
+                String,
+                trigger_topic,
+                10,
+            )
+
         # Inference status publisher — orchestrator owns the inference phase
         # half of the split (record half lives on /data/recording/status,
         # published by cyclo_data). See ~/.claude/plans/record-zippy-sunrise.md
@@ -196,6 +228,75 @@ class Communicator:
             self.heartbeat_qos_profile)
 
         self.node.get_logger().info('Publishers initialized')
+
+    def publish_initial_pose_return(self) -> tuple[bool, str]:
+        """Request the bringup-owned task initial-pose return trajectory."""
+        publisher = getattr(self, 'initial_pose_trigger_publisher', None)
+        if publisher is None:
+            return False, 'Robot config has no initial-pose trigger topic'
+        request_id = uuid.uuid4().hex
+        with self._initial_pose_lock:
+            self._initial_pose_request_id = request_id
+            self._initial_pose_state = 'requested'
+            self._initial_pose_message = ''
+            self._initial_pose_requested_at = time.monotonic()
+        # Correlate the completion with this request; a retained status from a
+        # previous home must never enable Start for a new physical motion.
+        publisher.publish(String(data=f'both_sticks_up:{request_id}'))
+        return True, 'Initial-pose return requested'
+
+    def _initial_pose_status_callback(self, message: String) -> None:
+        try:
+            payload = json.loads(message.data)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        with self._initial_pose_lock:
+            if (self._initial_pose_request_id is None
+                    or payload.get('request_id') != self._initial_pose_request_id):
+                return
+            state = payload.get('state')
+            if state not in {'running', 'succeeded', 'failed'}:
+                return
+            if self._initial_pose_state in {'succeeded', 'failed'}:
+                return
+            self._initial_pose_state = state
+            self._initial_pose_message = str(payload.get('message', ''))
+
+    def initial_pose_return_ready(self) -> tuple[bool, str]:
+        with self._initial_pose_lock:
+            if self._initial_pose_state == 'succeeded':
+                return True, 'Initial pose reached; ready for a fresh cycle'
+            if self._initial_pose_state == 'failed':
+                return False, f'Cycle Home failed: {self._initial_pose_message}. Retry Cycle Home.'
+            if time.monotonic() - self._initial_pose_requested_at > 100.0:
+                return False, 'Cycle Home completion was not confirmed. Retry Cycle Home.'
+            return False, 'Cycle Home is still running. Wait for both arms and hands to finish before Start.'
+
+    def _subscribe_head_camera_profile(self) -> None:
+        qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._head_camera_profile_sub = self.node.create_subscription(
+            String,
+            _HEAD_CAMERA_PROFILE_TOPIC,
+            self._head_camera_profile_callback,
+            qos,
+        )
+        self.node.get_logger().info(
+            f'Image grid camera profile topic: {_HEAD_CAMERA_PROFILE_TOPIC}')
+
+    def _head_camera_profile_callback(self, msg) -> None:
+        camera_name = str(getattr(msg, 'data', '') or '').strip()
+        if camera_name == self._head_camera_profile:
+            return
+        self._head_camera_profile = camera_name
+        self.node.get_logger().info(
+            f'Image grid camera profile updated: {camera_name or "<all>"}')
 
     def init_services(self):
         """Initialize services."""
@@ -327,13 +428,30 @@ class Communicator:
         image_groups = robot_schema.get_image_topics(self.robot_section)
         camera_topic_list: List[str] = []
         rotation_deg_list: List[int] = []
+        camera_profile = self._head_camera_profile
         for cam_name, cfg in image_groups.items():
             # Skip cams that aren't part of the recording inventory
             # (camera_topics is filtered by recording role).
             if cam_name not in self.camera_topics:
                 continue
+            if camera_profile in _HEAD_CAMERA_NAMES and cam_name != camera_profile:
+                continue
             camera_topic_list.append(cfg['topic'])
             rotation_deg_list.append(int(cfg.get('rotation_deg', 0) or 0))
+
+        if (
+            len(camera_topic_list) == 0
+            and camera_profile
+            and camera_profile not in self.camera_topics
+        ):
+            self.node.get_logger().warn(
+                f'Image grid camera profile {camera_profile!r} is not '
+                'available; using all image topics.')
+            for cam_name, cfg in image_groups.items():
+                if cam_name not in self.camera_topics:
+                    continue
+                camera_topic_list.append(cfg['topic'])
+                rotation_deg_list.append(int(cfg.get('rotation_deg', 0) or 0))
 
         if len(camera_topic_list) == 0:
             self.node.get_logger().error('No image topics found')
@@ -528,11 +646,15 @@ class Communicator:
         publisher_names = [
             'inference_status_publisher',
             'heartbeat_publisher',
+            'initial_pose_trigger_publisher',
         ]
         for publisher_name in publisher_names:
             self._destroy_publisher_if_exists(publisher_name)
 
     def _cleanup_subscribers(self):
+        if self._initial_pose_status_sub is not None:
+            self.node.destroy_subscription(self._initial_pose_status_sub)
+            self._initial_pose_status_sub = None
         if hasattr(self, 'joystick_trigger_subscriber') and \
            self.joystick_trigger_subscriber is not None:
             self.node.destroy_subscription(self.joystick_trigger_subscriber)

@@ -28,8 +28,8 @@ orchestrator:
             topic: /zed/zed_node/right/image_rect_color/compressed
             msg_type: sensor_msgs/msg/CompressedImage
 
-        # Raw tactile observations are recorded to MCAP, but not flattened
-        # into observation.state until the converter has a HandPressures parser.
+        # Raw tactile observations are recorded to MCAP and mean-pooled per
+        # finger into observation.state by the LeRobot converter.
         tactile:
           left_hand_pressure:
             topic: /left_hand/finger_pressures
@@ -39,8 +39,8 @@ orchestrator:
             msg_type: robotis_interfaces/msg/HandPressures
 
         state:
-          upper_body:
-            topic: /joint_states
+          arm_hand:
+            topic: /arm_hand/joint_states
             msg_type: sensor_msgs/msg/JointState
             joint_names:
               - arm_l_joint1
@@ -50,6 +50,13 @@ orchestrator:
               - arm_l_joint5
               - arm_l_joint6
               - arm_l_joint7
+              - arm_r_joint1
+              - arm_r_joint2
+              - arm_r_joint3
+              - arm_r_joint4
+              - arm_r_joint5
+              - arm_r_joint6
+              - arm_r_joint7
               - finger_l_joint1
               - finger_l_joint2
               - finger_l_joint3
@@ -70,13 +77,6 @@ orchestrator:
               - finger_l_joint18
               - finger_l_joint19
               - finger_l_joint20
-              - arm_r_joint1
-              - arm_r_joint2
-              - arm_r_joint3
-              - arm_r_joint4
-              - arm_r_joint5
-              - arm_r_joint6
-              - arm_r_joint7
               - finger_r_joint1
               - finger_r_joint2
               - finger_r_joint3
@@ -97,16 +97,6 @@ orchestrator:
               - finger_r_joint18
               - finger_r_joint19
               - finger_r_joint20
-              - head_joint1
-              - head_joint2
-              - lift_joint
-          mobile:
-            topic: /odom
-            msg_type: nav_msgs/msg/Odometry
-            joint_names:
-              - linear_x
-              - linear_y
-              - angular_z
 
       action:
         arm_left:
@@ -179,25 +169,6 @@ orchestrator:
             - finger_r_joint18
             - finger_r_joint19
             - finger_r_joint20
-        head:
-          topic: /leader/joystick_controller_left/joint_trajectory
-          msg_type: trajectory_msgs/msg/JointTrajectory
-          joint_names:
-            - head_joint1
-            - head_joint2
-        lift:
-          topic: /leader/joystick_controller_right/joint_trajectory
-          msg_type: trajectory_msgs/msg/JointTrajectory
-          joint_names:
-            - lift_joint
-        mobile:
-          topic: /cmd_vel
-          msg_type: geometry_msgs/msg/Twist
-          joint_names:
-            - linear_x
-            - linear_y
-            - angular_z
-
       recording:
         extra_topics:
           - /tf

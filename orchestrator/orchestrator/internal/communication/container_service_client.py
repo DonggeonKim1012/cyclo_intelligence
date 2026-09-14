@@ -128,6 +128,11 @@ class ContainerServiceClient:
     CMD_STOP = 4
     CMD_UNLOAD = 5
     CMD_UPDATE_INSTRUCTION = 6
+    CMD_RESET_CYCLE = 7
+    CMD_SWITCH_POLICY = 8
+    CMD_PRELOAD_POLICY = 9
+    CMD_CLEAR_PRELOAD = 10
+    CMD_SWITCH_PRELOADED = 11
 
     def __init__(
         self,
@@ -147,6 +152,15 @@ class ContainerServiceClient:
             "INFERENCE_LOAD_AVAILABILITY_TIMEOUT_SEC",
             180.0,
         )
+        # START/RESUME may synchronously wait for the policy's first action
+        # request (10 s in current policy runtimes). Keep the response deadline
+        # above that inner deadline. Cap service discovery at 5 s so the
+        # default combined wait is at most 25 s, below the UI's 30 s deadline.
+        self.start_resume_timeout_sec = _env_float(
+            "INFERENCE_START_RESUME_TIMEOUT_SEC",
+            20.0,
+        )
+        self.start_resume_availability_timeout_sec = 5.0
         self._connected = False
         self._cancelled = threading.Event()
         self._callback_group = callback_group
@@ -368,14 +382,18 @@ class ContainerServiceClient:
         other commands. ``task_instruction`` is used by LOAD (training-time
         conditioning) and RESUME (online re-conditioning). ``publish_to_robot``
         gates the policy container's robot command publishers; false is
-        simulation / 3D preview only. ``action_request_mode`` controls whether
-        the policy Main runtime prefetches chunks ("async") or waits for the
-        current buffer to drain ("sync"). ``acceleration_mode`` and
+        simulation / 3D preview only. ``action_request_mode`` selects
+        latency/time alignment ("async"), near-tail ordered prefetch
+        ("async_ordered"), or general ordered refill ("sync").
+        ``acceleration_mode`` and
         ``acceleration_engine_path`` are LOAD-time runtime optimization knobs.
 
         Timeout defaults to INFERENCE_LOAD_TIMEOUT_SEC for LOAD (CUDA init,
-        weight load, and first-time gated backbone downloads) and 10 s for
-        everything else; override via ``timeout_sec``.
+        weight load, and first-time gated backbone downloads),
+        INFERENCE_START_RESUME_TIMEOUT_SEC (20 s) for START/RESUME, and 10 s
+        for everything else; override any command via ``timeout_sec``.
+        START/RESUME service discovery is capped at 5 s, making their default
+        total wait at most 25 s versus the UI's 30 s service deadline.
         """
         request = InferenceCommand.Request()
         request.command = int(command)
@@ -393,14 +411,20 @@ class ContainerServiceClient:
             request.acceleration_engine_path = str(acceleration_engine_path or "")
 
         if timeout_sec is None:
-            timeout_sec = (
-                self.load_timeout_sec if command == self.CMD_LOAD else 10.0
+            if command in {self.CMD_LOAD, self.CMD_SWITCH_POLICY, self.CMD_PRELOAD_POLICY}:
+                timeout_sec = self.load_timeout_sec
+            elif command in {self.CMD_START, self.CMD_RESUME, self.CMD_RESET_CYCLE}:
+                timeout_sec = self.start_resume_timeout_sec
+            else:
+                timeout_sec = 10.0
+        if command in {self.CMD_LOAD, self.CMD_SWITCH_POLICY, self.CMD_PRELOAD_POLICY}:
+            availability_timeout_sec = self.load_availability_timeout_sec
+        elif command in {self.CMD_START, self.CMD_RESUME, self.CMD_RESET_CYCLE}:
+            availability_timeout_sec = (
+                self.start_resume_availability_timeout_sec
             )
-        availability_timeout_sec = (
-            self.load_availability_timeout_sec
-            if command == self.CMD_LOAD
-            else 10.0
-        )
+        else:
+            availability_timeout_sec = 10.0
 
         return self._call_service(
             self._inference_command_client,

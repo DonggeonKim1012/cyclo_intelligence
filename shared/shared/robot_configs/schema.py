@@ -41,6 +41,8 @@ around what a VLA dataset / training pipeline cares about:
       topic: <ros topic>                  # both inference command + record target
       msg_type: <ros msg type string>
       joint_names: [<name>, ...]
+      record: <bool>                      # optional; false keeps layout only
+      fixed_value: [<float>, ...]          # optional fill for record:false
   recording:
     extra_topics: [<topic>, ...]          # /tf, camera_info, ...
   urdf_path: <path>
@@ -150,14 +152,7 @@ def load_robot_section(
 # ---------------------------------------------------------------------------
 
 
-def get_image_topics(section: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Return ``{cam_name: {topic, rotation_deg?, msg_type}}``.
-
-    Default ``msg_type`` is ``sensor_msgs/msg/CompressedImage`` — the only
-    image type the conversion + web video pipelines support today. yaml
-    can override per-camera if a non-compressed source ever lands.
-    """
-    images = (section.get("observation") or {}).get("images") or {}
+def _parse_image_topics(images: Any) -> Dict[str, Dict[str, Any]]:
     result: Dict[str, Dict[str, Any]] = {}
     for name, cfg in images.items():
         if not isinstance(cfg, dict) or "topic" not in cfg:
@@ -171,6 +166,17 @@ def get_image_topics(section: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
             entry["rotation_deg"] = int(rot)
         result[name] = entry
     return result
+
+
+def get_image_topics(section: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Return ``{cam_name: {topic, rotation_deg?, msg_type}}``.
+
+    Default ``msg_type`` is ``sensor_msgs/msg/CompressedImage`` — the only
+    image type the conversion + web video pipelines support today. yaml
+    can override per-camera if a non-compressed source ever lands.
+    """
+    images = (section.get("observation") or {}).get("images") or {}
+    return _parse_image_topics(images)
 
 
 def get_state_groups(section: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -196,9 +202,8 @@ def get_state_groups(section: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 def get_tactile_topics(section: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """Return ``{sensor_name: {topic, msg_type}}`` for raw tactile streams.
 
-    Tactile messages are robot observations, but they are intentionally
-    separate from ``observation.state`` until the converter has an explicit
-    ``HandPressures`` -> numeric vector parser.
+    The LeRobot converter treats these as observation streams and mean-pools
+    each ``HandPressures`` finger sensor into ``observation.state``.
     """
     tactile = (section.get("observation") or {}).get("tactile") or {}
     result: Dict[str, Dict[str, Any]] = {}
@@ -220,19 +225,35 @@ def get_action_groups(section: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 
     Each entry's ``topic`` is BOTH the inference command target (Process B
     publishes here) AND the rosbag record target. ``joint_names`` is the
-    dimension layout for that slice of the action vector.
+    dimension layout for that slice of the action vector. Set
+    ``record: false`` to keep a modality in the action layout while excluding
+    its command topic from data collection.
     """
     actions = section.get("action") or {}
     result: Dict[str, Dict[str, Any]] = {}
     for modality, cfg in actions.items():
         if not isinstance(cfg, dict) or "topic" not in cfg:
             continue
+        record = cfg.get("record", True)
+        if isinstance(record, str):
+            record = record.lower() not in ("false", "0", "no", "off")
         result[modality] = {
             "topic": cfg["topic"],
             "msg_type": cfg.get("msg_type", "trajectory_msgs/msg/JointTrajectory"),
             "joint_names": list(cfg.get("joint_names") or []),
+            "record": bool(record),
+            "fixed_value": list(cfg.get("fixed_value") or []),
         }
     return result
+
+
+def get_recorded_action_groups(section: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Action groups whose command topics should be recorded into MCAP."""
+    return {
+        name: cfg
+        for name, cfg in get_action_groups(section).items()
+        if cfg.get("record", True)
+    }
 
 
 def get_action_joint_names(section: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -315,7 +336,7 @@ def get_mcap_record_topics(section: Dict[str, Any]) -> List[str]:
         topics.append(cfg["topic"])
     for cfg in get_tactile_topics(section).values():
         topics.append(cfg["topic"])
-    for cfg in get_action_groups(section).values():
+    for cfg in get_recorded_action_groups(section).values():
         topics.append(cfg["topic"])
     for extra in get_recording_extra_topics(section):
         if extra in info_topics:

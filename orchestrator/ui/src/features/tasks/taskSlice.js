@@ -22,6 +22,11 @@ import {
   getInferenceTaskInfoKey,
   getRecordTaskInfoKey,
 } from '../../utils/taskInfoSync';
+import {
+  DEFAULT_INFERENCE_HZ,
+  defaultInferenceHz,
+  resolveActionRequestMode,
+} from '../../constants/policyCapabilities';
 
 const SYNCED_MESSAGE = 'Session task info synced.';
 const CONFLICT_MESSAGE = 'Server task info changed while editing; local draft not synced.';
@@ -112,12 +117,12 @@ const inferenceTaskInfoInitialState = {
   policyPath: '',
   recordInferenceMode: false,
   controlHz: 100,
-  inferenceHz: 15,
+  inferenceHz: defaultInferenceHz('lerobot', 'act'),
   chunkAlignWindowS: 0.3,
   serviceType: 'lerobot',
   policyType: 'act',
   inferenceMode: 'simulation',
-  actionRequestMode: 'async',
+  actionRequestMode: resolveActionRequestMode('lerobot', 'act', 'async'),
   accelerationMode: 'pytorch',
   accelerationEnginePath: '',
 };
@@ -141,10 +146,11 @@ const copyInferenceTaskInfo = (
 ) => ({
   ...inferenceTaskInfoInitialState,
   ...inferenceTaskInfo,
-  actionRequestMode:
-    String(inferenceTaskInfo.actionRequestMode || '').trim().toLowerCase() === 'sync'
-      ? 'sync'
-      : 'async',
+  actionRequestMode: resolveActionRequestMode(
+    inferenceTaskInfo.serviceType ?? inferenceTaskInfoInitialState.serviceType,
+    inferenceTaskInfo.policyType ?? inferenceTaskInfoInitialState.policyType,
+    inferenceTaskInfo.actionRequestMode
+  ),
 });
 
 const selectTasksState = (state) => state.tasks || state;
@@ -277,6 +283,12 @@ const applyRecordTaskInfo = (state, taskInfo = {}, options = {}) => {
 
 const applyInferenceTaskInfo = (state, taskInfo = {}) => {
   applySharedTaskInfo(state, taskInfo);
+  const serviceType = String(
+    taskInfo.serviceType ?? state.inferenceTaskInfo.serviceType ?? ''
+  );
+  const policyType = String(
+    taskInfo.policyType ?? state.inferenceTaskInfo.policyType ?? 'act'
+  );
   state.inferenceTaskInfo = {
     ...state.inferenceTaskInfo,
     taskType: 'inference',
@@ -285,20 +297,25 @@ const applyInferenceTaskInfo = (state, taskInfo = {}) => {
       ? Boolean(taskInfo.recordInferenceMode)
       : Boolean(state.inferenceTaskInfo.recordInferenceMode),
     controlHz: taskInfo.controlHz ?? state.inferenceTaskInfo.controlHz ?? 100,
-    inferenceHz: taskInfo.inferenceHz ?? state.inferenceTaskInfo.inferenceHz ?? 15,
+    inferenceHz:
+      taskInfo.inferenceHz ??
+      state.inferenceTaskInfo.inferenceHz ??
+      defaultInferenceHz(
+        taskInfo.serviceType ?? state.inferenceTaskInfo.serviceType,
+        taskInfo.policyType ?? state.inferenceTaskInfo.policyType
+      ),
     chunkAlignWindowS:
       taskInfo.chunkAlignWindowS ?? state.inferenceTaskInfo.chunkAlignWindowS ?? 0.3,
-    serviceType: String(taskInfo.serviceType ?? state.inferenceTaskInfo.serviceType ?? ''),
-    policyType: String(taskInfo.policyType ?? state.inferenceTaskInfo.policyType ?? 'act'),
+    serviceType,
+    policyType,
     inferenceMode:
       String(taskInfo.inferenceMode ?? state.inferenceTaskInfo.inferenceMode ?? 'simulation') ||
       'simulation',
-    actionRequestMode:
-      String(
-        taskInfo.actionRequestMode ?? state.inferenceTaskInfo.actionRequestMode ?? ''
-      ).trim().toLowerCase() === 'sync'
-        ? 'sync'
-        : 'async',
+    actionRequestMode: resolveActionRequestMode(
+      serviceType,
+      policyType,
+      taskInfo.actionRequestMode ?? state.inferenceTaskInfo.actionRequestMode
+    ),
     accelerationMode: String(
       taskInfo.accelerationMode ?? state.inferenceTaskInfo.accelerationMode ?? 'pytorch'
     ),
@@ -360,6 +377,7 @@ const initialState = {
     error: '',
     topicReceived: false,
   },
+  inferenceModelSwitch: { nextPolicyPath: '', busy: false, preloadBusy: false, usePreload: false, preloadedPath: '', needsClear: false, message: '', error: '' },
 
   availableRobots: [],
   availableCameras: [],
@@ -422,7 +440,14 @@ const taskSlice = createSlice({
       state.recordStatus = initialState.recordStatus;
     },
     setInferenceStatus: (state, action) => {
+      if (action.payload.inferencePhase === InferencePhase.READY
+          && state.inferenceStatus.inferencePhase !== InferencePhase.READY) {
+        state.inferenceModelSwitch.preloadedPath = '';
+      }
       state.inferenceStatus = { ...state.inferenceStatus, ...action.payload };
+    },
+    setInferenceModelSwitch: (state, action) => {
+      state.inferenceModelSwitch = { ...state.inferenceModelSwitch, ...action.payload };
     },
     resetInferenceStatus: (state) => {
       state.inferenceStatus = initialState.inferenceStatus;
@@ -626,6 +651,7 @@ const taskSlice = createSlice({
       const isInferenceEcho = serverTaskInfo.taskType === 'inference';
       if (isInferenceEcho) {
         const currentInferenceTaskInfo = buildInferenceTaskInfo(state);
+        const hasLocalInferenceEdit = hasLocalInferenceTaskInfoEdit(state);
         const currentRecordTaskInfo = buildRecordTaskInfo(state);
         const currentRecordTaskKey = getRecordTaskInfoKey(currentRecordTaskInfo);
         const hasLocalRecordEdit = hasLocalRecordTaskInfoEdit(state);
@@ -637,21 +663,41 @@ const taskSlice = createSlice({
         const inferenceServerTaskInfo = protectRecordSharedInstruction
           ? omitTaskInstruction(serverTaskInfo)
           : serverTaskInfo;
-        const nextInferenceTaskInfo = {
+        let nextInferenceTaskInfo = {
           ...currentInferenceTaskInfo,
           ...inferenceServerTaskInfo,
           taskType: 'inference',
         };
+        const policyDefaultHz = defaultInferenceHz(
+          nextInferenceTaskInfo.serviceType,
+          nextInferenceTaskInfo.policyType
+        );
+        const isLegacyGenericHzEcho = Boolean(
+          !hasLocalInferenceEdit &&
+          policyDefaultHz !== DEFAULT_INFERENCE_HZ &&
+          Number(currentInferenceTaskInfo.inferenceHz) === policyDefaultHz &&
+          Number(inferenceServerTaskInfo.inferenceHz) === DEFAULT_INFERENCE_HZ
+        );
+        if (isLegacyGenericHzEcho) {
+          // Old orchestrator/UI sessions echo the former generic 15 Hz
+          // default without policy provenance. Preserve the selected ACT
+          // policy's 30 Hz default on initial hydration. A user edit remains
+          // authoritative because dirty drafts skip this migration guard.
+          nextInferenceTaskInfo = {
+            ...nextInferenceTaskInfo,
+            inferenceHz: policyDefaultHz,
+          };
+        }
         const currentInferenceTaskKey = getInferenceTaskInfoKey(currentInferenceTaskInfo);
         const nextInferenceTaskKey = getInferenceTaskInfoKey(nextInferenceTaskInfo);
         if (
-          hasLocalInferenceTaskInfoEdit(state) &&
+          hasLocalInferenceEdit &&
           nextInferenceTaskKey !== currentInferenceTaskKey
         ) {
           return;
         }
         if (
-          !hasLocalInferenceTaskInfoEdit(state) &&
+          !hasLocalInferenceEdit &&
           state.inferenceTaskInfoSync.staleEchoTaskKey &&
           nextInferenceTaskKey === state.inferenceTaskInfoSync.staleEchoTaskKey &&
           state.inferenceTaskInfoSync.serverTaskKey === currentInferenceTaskKey &&
@@ -777,6 +823,7 @@ export const {
   setRecordStatus,
   resetRecordStatus,
   setInferenceStatus,
+  setInferenceModelSwitch,
   resetInferenceStatus,
   selectRobotType,
   setTaskType,

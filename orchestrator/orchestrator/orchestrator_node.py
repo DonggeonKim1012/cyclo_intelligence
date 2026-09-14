@@ -55,6 +55,12 @@ from interfaces.srv import (
 )
 
 from orchestrator.internal.communication.communicator import Communicator
+from orchestrator.internal.communication.joystick_controls import (
+    ARM_TOGGLE_TRIGGERS,
+    RECORD_CANCEL_ACTION,
+    RECORD_TOGGLE_ACTION,
+    get_joystick_recording_action,
+)
 from orchestrator.internal.communication.cyclo_data_client import CycloDataClient
 # DataManager is imported only for its whoami_huggingface @staticmethod
 # used by set_hf_user / get_hf_user callbacks. Session-state ownership
@@ -68,7 +74,16 @@ from orchestrator.internal.communication.container_service_client import (
     ContainerServiceClient,
 )
 from orchestrator.internal.communication.inference_mode import (
-    publish_to_robot_from_task_info,
+    publish_to_robot_override_from_task_info,
+)
+from orchestrator.internal.communication.model_switch import (
+    SWITCH_INFERENCE_MODEL_COMMAND,
+    PRELOAD_INFERENCE_MODEL_COMMAND,
+    CLEAR_PRELOADED_MODEL_COMMAND,
+    SWITCH_PRELOADED_MODEL_COMMAND,
+    intercept_model_switch_command,
+    prepare_inference_model,
+    switch_inference_model,
 )
 from orchestrator.timer.timer_manager import TimerManager
 from orchestrator.training.zenoh_training_manager import ZenohTrainingManager
@@ -87,6 +102,16 @@ def _env_int(name, default):
         return int(os.environ.get(name, default))
     except (TypeError, ValueError):
         return int(default)
+
+
+# Adding a constant to SendCommand.srv does not change its wire layout, but a
+# running container may still have generated Python bindings from the previous
+# interface build. Keep numeric compatibility until that image is rebuilt.
+PREPARE_NEXT_CYCLE_COMMAND = getattr(
+    SendCommand.Request,
+    'PREPARE_NEXT_CYCLE',
+    25,
+)
 
 
 class OrchestratorNode(Node):
@@ -145,7 +170,10 @@ class OrchestratorNode(Node):
         self._recording_command_lock = threading.Lock()
         # LOAD/START and STOP/UNLOAD must not cross in flight. The UI can send
         # Clear then Start faster than the policy container can release CUDA.
-        self._inference_lifecycle_lock = threading.Lock()
+        self._inference_lifecycle_lock = threading.RLock()
+        self._model_switch_operation = None
+        self._model_switch_needs_retry = False
+        self._inference_phase = InferenceStatus.READY
 
         self.params = None
         self.robot_section = None
@@ -201,6 +229,10 @@ class OrchestratorNode(Node):
         self._loaded_inference_acceleration_mode: str = 'pytorch'
         self._loaded_inference_acceleration_engine_path: str = ''
         self._loaded_inference_action_request_mode: str = 'async'
+        # True only after PREPARE_NEXT_CYCLE has paused policy publishing and
+        # requested the bringup-owned task initial pose. The next Start uses a
+        # fresh episode reset rather than continuation Resume.
+        self._inference_cycle_prepared: bool = False
 
         # HF endpoint registry — orchestrator-owned because the
         # set/get/list/select_hf_endpoint services also read and mutate
@@ -887,6 +919,7 @@ class OrchestratorNode(Node):
         only signals LOADING / INFERENCING / PAUSED / READY on commands.
         Record-side phase lives on /data/recording/status (D18).
         """
+        self._inference_phase = phase
         if self.communicator is None:
             return
         robot_type = getattr(self, 'robot_type', '') or ''
@@ -1087,6 +1120,23 @@ class OrchestratorNode(Node):
             self.training_timer.stop('training_status')
 
     def user_interaction_callback(self, request, response):
+        intercepted = intercept_model_switch_command(self, request, response)
+        if intercepted is not None:
+            return intercepted
+        # Keep Home's PAUSE + request marker atomic with Start/Resume/Stop.
+        # In particular, a concurrent Start must not observe the old marker
+        # while a newly requested physical home is in progress.
+        if request.command in {
+            SendCommand.Request.START_INFERENCE,
+            SendCommand.Request.RESUME_INFERENCE,
+            SendCommand.Request.STOP_INFERENCE,
+            PREPARE_NEXT_CYCLE_COMMAND,
+        }:
+            with self._inference_lifecycle_lock:
+                return self._user_interaction_callback(request, response)
+        return self._user_interaction_callback(request, response)
+
+    def _user_interaction_callback(self, request, response):
         """
         Handle user commands for recording control (simplified mode).
 
@@ -1096,6 +1146,30 @@ class OrchestratorNode(Node):
         - RERECORD: Cancel current recording (discard)
         """
         try:
+            intercepted = intercept_model_switch_command(self, request, response)
+            if intercepted is not None:
+                return intercepted
+            if request.command in {
+                SendCommand.Request.START_INFERENCE,
+                SendCommand.Request.RESUME_INFERENCE,
+            }:
+                with self._state_lock:
+                    cycle_pending = self._inference_cycle_prepared
+                if cycle_pending:
+                    communicator = self.communicator
+                    if communicator is None:
+                        response.success = False
+                        response.message = 'Cycle Home completion cannot be checked: robot communicator is unavailable'
+                        return response
+                    ready, message = communicator.initial_pose_return_ready()
+                    if not ready:
+                        response.success = False
+                        response.message = message
+                        return response
+            if request.command in {PRELOAD_INFERENCE_MODEL_COMMAND, CLEAR_PRELOADED_MODEL_COMMAND}:
+                return prepare_inference_model(self, request, response)
+            if request.command in {SWITCH_INFERENCE_MODEL_COMMAND, SWITCH_PRELOADED_MODEL_COMMAND}:
+                return switch_inference_model(self, request, response)
             if request.command == SendCommand.Request.REFRESH_TOPICS:
                 # Forward to cyclo_data /data/recording with the topic
                 # inventory from our Communicator (Part C2d-4).
@@ -1309,6 +1383,18 @@ class OrchestratorNode(Node):
 
             elif request.command == SendCommand.Request.START_INFERENCE:
                 task_info = request.task_info
+                try:
+                    requested_publish_to_robot = (
+                        publish_to_robot_override_from_task_info(task_info)
+                    )
+                except ValueError as exc:
+                    response.success = False
+                    response.message = str(exc)
+                    return response
+                # A brand-new inference session has no loaded mode to inherit.
+                # Only an explicit Robot request may enable robot publishing;
+                # absent legacy mode metadata defaults safely to Simulation.
+                publish_to_robot = bool(requested_publish_to_robot)
                 self._cache_ui_task_info(task_info, 'START_INFERENCE')
 
                 task_instruction = (
@@ -1316,7 +1402,6 @@ class OrchestratorNode(Node):
                     if task_info.task_instruction
                     else ''
                 )
-                publish_to_robot = publish_to_robot_from_task_info(task_info)
                 service_prefix = self._determine_service_prefix(task_info)
                 requested_acceleration_mode, requested_acceleration_engine_path = (
                     self._acceleration_from_task_info(task_info)
@@ -1357,6 +1442,8 @@ class OrchestratorNode(Node):
                     existing_client is not None
                     and existing_client._service_prefix == service_prefix
                 ):
+                    with self._state_lock:
+                        cycle_prepared = self._inference_cycle_prepared
                     loaded_signature = (
                         loaded_policy_path,
                         loaded_acceleration_mode,
@@ -1382,7 +1469,11 @@ class OrchestratorNode(Node):
                         self._teardown_inference_client()
                     else:
                         resume_result = existing_client.inference_command(
-                            ContainerServiceClient.CMD_RESUME,
+                            (
+                                ContainerServiceClient.CMD_RESET_CYCLE
+                                if cycle_prepared
+                                else ContainerServiceClient.CMD_RESUME
+                            ),
                             task_instruction=task_instruction,
                             publish_to_robot=publish_to_robot,
                         )
@@ -1391,6 +1482,7 @@ class OrchestratorNode(Node):
                                 self._loaded_inference_publish_to_robot = (
                                     publish_to_robot
                                 )
+                                self._inference_cycle_prepared = False
                             self._set_session_active(
                                 on_inference=True,
                                 start_time=time.perf_counter(),
@@ -1399,6 +1491,8 @@ class OrchestratorNode(Node):
                                 InferenceStatus.INFERENCING)
                             response.success = True
                             response.message = (
+                                'Fresh inference cycle started after Cycle Home'
+                                if cycle_prepared else
                                 'Inference resumed (model already loaded)'
                             )
                             start_handled = True
@@ -1566,6 +1660,7 @@ class OrchestratorNode(Node):
                                     self._loaded_inference_action_request_mode = (
                                         requested_action_request_mode
                                     )
+                                    self._inference_cycle_prepared = False
 
                                 self._set_session_active(
                                     on_inference=True,
@@ -1748,6 +1843,15 @@ class OrchestratorNode(Node):
                     selected_joints=list(
                         getattr(request, 'selected_joints', []) or []
                     ),
+                    tactile_mode=str(
+                        getattr(request, 'tactile_mode', '') or 'state_mean'
+                    ),
+                    selected_tactile_topics=list(
+                        getattr(request, 'selected_tactile_topics', []) or []
+                    ),
+                    tactile_baseline_samples=int(
+                        getattr(request, 'tactile_baseline_samples', 0) or 20
+                    ),
                 )
                 if not result.success or result.response is None:
                     response.success = False
@@ -1839,6 +1943,8 @@ class OrchestratorNode(Node):
                                 ContainerServiceClient.CMD_PAUSE,
                             )
                             if result.success:
+                                # Stop does not turn a pending fresh cycle into
+                                # continuation of the episode before Home.
                                 self._publish_inference_phase(InferenceStatus.PAUSED)
                             response.success = result.success
                             response.message = result.message or 'Inference paused'
@@ -1852,25 +1958,119 @@ class OrchestratorNode(Node):
                             loaded_publish_to_robot = (
                                 self._loaded_inference_publish_to_robot
                             )
+                            cycle_prepared = self._inference_cycle_prepared
                         if client is not None:
+                            task_info = request.task_info
+                            try:
+                                requested_publish_to_robot = (
+                                    publish_to_robot_override_from_task_info(
+                                        task_info
+                                    )
+                                )
+                            except ValueError as exc:
+                                response.success = False
+                                response.message = str(exc)
+                                return response
+                            resume_publish_to_robot = (
+                                loaded_publish_to_robot
+                                if requested_publish_to_robot is None
+                                else requested_publish_to_robot
+                            )
                             task_instruction = (
-                                request.task_info.task_instruction[0]
-                                if request.task_info.task_instruction
+                                task_info.task_instruction[0]
+                                if task_info.task_instruction
                                 else ''
                             )
                             result = client.inference_command(
-                                ContainerServiceClient.CMD_RESUME,
+                                (
+                                    ContainerServiceClient.CMD_RESET_CYCLE
+                                    if cycle_prepared
+                                    else ContainerServiceClient.CMD_RESUME
+                                ),
                                 task_instruction=task_instruction,
-                                publish_to_robot=loaded_publish_to_robot,
+                                publish_to_robot=resume_publish_to_robot,
                             )
                             if result.success:
-                                self.on_inference = True
+                                with self._state_lock:
+                                    if self.container_service_client is client:
+                                        self._loaded_inference_publish_to_robot = (
+                                            resume_publish_to_robot
+                                        )
+                                        self._inference_cycle_prepared = False
+                                if cycle_prepared:
+                                    self._set_session_active(
+                                        on_inference=True,
+                                        start_time=time.perf_counter(),
+                                    )
+                                else:
+                                    self._set_session_active(on_inference=True)
                                 self._publish_inference_phase(InferenceStatus.INFERENCING)
                             response.success = result.success
-                            response.message = result.message or 'Inference resumed'
+                            response.message = (
+                                'Fresh inference cycle started after Cycle Home'
+                                if result.success and cycle_prepared
+                                else result.message or 'Inference resumed'
+                            )
                         else:
                             response.success = False
                             response.message = 'No inference session active'
+
+                    elif request.command == PREPARE_NEXT_CYCLE_COMMAND:
+                        with self._state_lock:
+                            client = self.container_service_client
+                            publish_to_robot = self._loaded_inference_publish_to_robot
+                        if client is None:
+                            response.success = False
+                            response.message = 'No inference session active'
+                        elif not publish_to_robot:
+                            response.success = False
+                            response.message = (
+                                'Cycle Home is available only for Real Robot Deploy'
+                            )
+                        elif self.robot_type != 'ffw_sh5_rev1':
+                            response.success = False
+                            response.message = (
+                                'Cycle Home is configured only for ffw_sh5_rev1'
+                            )
+                        elif self.communicator is None:
+                            response.success = False
+                            response.message = 'Robot communicator is not ready'
+                        else:
+                            # Never request physical pose return until policy
+                            # publishing has acknowledged PAUSE.
+                            with self._inference_lifecycle_lock:
+                                pause_result = client.inference_command(
+                                    ContainerServiceClient.CMD_PAUSE,
+                                )
+                                if not pause_result.success:
+                                    response.success = False
+                                    response.message = (
+                                        pause_result.message
+                                        or 'Failed to pause inference before homing'
+                                    )
+                                else:
+                                    # PAUSE is already authoritative even if
+                                    # the subsequent pose-return publication
+                                    # fails; keep the UI lifecycle truthful.
+                                    self._publish_inference_phase(
+                                        InferenceStatus.PAUSED
+                                    )
+                                    with self._state_lock:
+                                        if self.container_service_client is client:
+                                            self._inference_cycle_prepared = True
+                                    home_success, home_message = (
+                                        self.communicator.publish_initial_pose_return()
+                                    )
+                                    if home_success:
+                                        response.success = True
+                                        response.message = (
+                                            'Inference paused and task initial-pose '
+                                            'return requested. Wait until motion stops, '
+                                            'reset the cups with hands clear, then press Start.'
+                                        )
+                                    else:
+                                        response.success = False
+                                        response.message = home_message
 
                     elif request.command == SendCommand.Request.UPDATE_INSTRUCTION:
                         # Mid-run language re-conditioning. Lifecycle stays
@@ -2454,8 +2654,8 @@ class OrchestratorNode(Node):
 
     # LeRobot policy types (used for service_prefix detection)
     LEROBOT_POLICIES = {
-        'tdmpc', 'diffusion', 'act', 'vqbet', 'pi0', 'pi0_fast', 'pi05',
-        'smolvla', 'xvla', 'sac',
+        'tdmpc', 'diffusion', 'act', 'tactile_act', 'vqbet', 'pi0', 'pi0_fast', 'pi05',
+        'smolvla', 'trex', 'xvla', 'sac', 'fastwam',
     }
 
     @staticmethod
@@ -2501,6 +2701,10 @@ class OrchestratorNode(Node):
     @staticmethod
     def _normalize_action_request_mode(value: str) -> str:
         mode = str(value or '').strip().lower()
+        if mode in {'async_ordered', 'ordered_async'}:
+            return 'async_ordered'
+        if mode in {'sync_step', 'step_sync'}:
+            return 'sync_step'
         if mode == 'sync':
             return 'sync'
         return 'async'
@@ -2514,22 +2718,52 @@ class OrchestratorNode(Node):
     def _determine_service_prefix(self, task_info) -> str:
         """Determine inference service prefix from task_info or policy config.
 
-        1. If task_info has service_type field, use it directly.
-        2. Otherwise, read policy_path/config.json to detect policy type.
-        3. LeRobot policy types -> "/lerobot", default -> "/groot".
+        ViTacFormer model metadata is authoritative because older UI bundles
+        advertised ViTacFormer as a LeRobot policy and therefore sent
+        ``service_type=lerobot``.  For all other models, an explicit
+        ``service_type`` remains authoritative before the normal config-based
+        fallback is used.
         """
-        # Check for explicit service_type in task_info
-        service_type = getattr(task_info, 'service_type', None)
-        if service_type:
-            prefix = f'/{service_type.strip("/")}'
-            self.get_logger().info(f'Service prefix from task_info: {prefix}')
-            return prefix
-
         # Detect from policy config. LeRobot training output nests the
         # checkpoint under <root>/pretrained_model/ — try that path too
         # so users who paste the training root still get the right routing.
+        service_type = str(
+            getattr(task_info, 'service_type', '') or ''
+        ).strip('/')
         policy_path = getattr(task_info, 'policy_path', '')
+        detected_policy_type = ''
         if policy_path:
+            selected = Path(policy_path)
+            root = selected.parent if selected.is_file() else selected
+            train_config_path = next(
+                (
+                    candidate / 'train_config.json'
+                    for candidate in (root, *list(root.parents)[:3])
+                    if (candidate / 'train_config.json').exists()
+                ),
+                None,
+            )
+            if train_config_path is not None:
+                try:
+                    with open(train_config_path) as f:
+                        train_config = json.load(f)
+                    architecture = str(
+                        train_config.get('architecture', '')
+                    ).lower()
+                    if 'vitacformer' in architecture:
+                        if service_type and service_type != 'vitacformer':
+                            self.get_logger().warning(
+                                'ViTacFormer model metadata overrides '
+                                f'conflicting service_type={service_type!r}'
+                            )
+                        self.get_logger().info(
+                            'Detected dedicated ViTacFormer training output'
+                        )
+                        return '/vitacformer'
+                except Exception as e:
+                    self.get_logger().warning(
+                        f'Failed to read ViTacFormer train config: {e}'
+                    )
             root = Path(policy_path)
             config_path = root / 'config.json'
             if not config_path.exists() and (root / 'pretrained_model' / 'config.json').exists():
@@ -2538,16 +2772,32 @@ class OrchestratorNode(Node):
                 try:
                     with open(config_path) as f:
                         config = json.load(f)
-                    policy_type = config.get('type', '')
-                    if policy_type in self.LEROBOT_POLICIES:
+                    detected_policy_type = str(config.get('type', '')).lower()
+                    if detected_policy_type == 'vitacformer':
+                        if service_type and service_type != 'vitacformer':
+                            self.get_logger().warning(
+                                'ViTacFormer policy metadata overrides '
+                                f'conflicting service_type={service_type!r}'
+                            )
                         self.get_logger().info(
-                            f'Detected LeRobot policy type: {policy_type}'
+                            'Detected dedicated ViTacFormer policy type'
                         )
-                        return '/lerobot'
+                        return '/vitacformer'
                 except Exception as e:
                     self.get_logger().warning(
                         f'Failed to read policy config: {e}'
                     )
+
+        if service_type:
+            prefix = f'/{service_type}'
+            self.get_logger().info(f'Service prefix from task_info: {prefix}')
+            return prefix
+
+        if detected_policy_type in self.LEROBOT_POLICIES:
+            self.get_logger().info(
+                f'Detected LeRobot policy type: {detected_policy_type}'
+            )
+            return '/lerobot'
 
         # Default to groot for backward compatibility
         return '/groot'
@@ -2570,10 +2820,12 @@ class OrchestratorNode(Node):
                 return
             self.container_service_client = None
             self._loaded_inference_policy_path = ''
+            self._model_switch_needs_retry = False
             self._loaded_inference_publish_to_robot = False
             self._loaded_inference_acceleration_mode = 'pytorch'
             self._loaded_inference_acceleration_engine_path = ''
             self._loaded_inference_action_request_mode = 'async'
+            self._inference_cycle_prepared = False
         if client is None:
             return
 
@@ -2806,7 +3058,10 @@ class OrchestratorNode(Node):
         """
         Handle leader tact triggers as backend-owned recording controls.
 
-        ``right`` toggles start/save. ``left`` cancels the active recording.
+        A short click remains dedicated to mini-leader arm enable/disable.
+        A right long press toggles start/save; a left long press cancels the
+        active recording. Keeping recording on long presses prevents one tact
+        click from changing arm control and recording state at the same time.
         """
         self.get_logger().info(f'Joystick trigger: {joystick_mode}')
 
@@ -2815,49 +3070,50 @@ class OrchestratorNode(Node):
                 f'Joystick trigger ignored without communicator: {joystick_mode}')
             return
 
-        if joystick_mode in ('right', 'left'):
-            snapshot_on_recording, snapshot_on_inference = (
-                self._snapshot_session_state()
-            )
-            if snapshot_on_inference:
-                if self._get_inference_record_task_info() is None:
-                    self.get_logger().warning(
-                        'Inference trigger ignored: no inference task info available')
-                    return
-                if joystick_mode == 'right':
-                    self._toggle_inference_trigger_recording(snapshot_on_recording)
-                elif snapshot_on_recording:
-                    self._cancel_inference_trigger_recording()
-                else:
-                    self.get_logger().debug(
-                        'Inference trigger cancel ignored: no active recording')
-                return
+        recording_action = get_joystick_recording_action(joystick_mode)
+        if recording_action is None:
+            if joystick_mode in ARM_TOGGLE_TRIGGERS:
+                self.get_logger().debug(
+                    f'Short {joystick_mode} click reserved for mini-leader '
+                    'arm enable/disable; no recording action')
+            else:
+                self.get_logger().info(
+                    f'Unknown joystick trigger: {joystick_mode}')
+            return
 
-            if self._prepared_record_task_info is None:
+        snapshot_on_recording, snapshot_on_inference = (
+            self._snapshot_session_state()
+        )
+        if snapshot_on_inference:
+            if self._get_inference_record_task_info() is None:
                 self.get_logger().warning(
-                    'Record trigger ignored: prepare the Record session first')
+                    'Inference trigger ignored: no inference task info available')
                 return
-            if joystick_mode == 'right':
-                if snapshot_on_recording:
-                    self._stop_record_trigger_segment()
-                else:
-                    self._start_record_trigger_segment(
-                        int(self._trigger_record_next_segment_index)
-                    )
+            if recording_action == RECORD_TOGGLE_ACTION:
+                self._toggle_inference_trigger_recording(snapshot_on_recording)
             elif snapshot_on_recording:
-                self._cancel_record_trigger_segment()
+                self._cancel_inference_trigger_recording()
             else:
                 self.get_logger().debug(
-                    'Record trigger cancel ignored: no active recording')
+                    'Inference trigger cancel ignored: no active recording')
+            return
 
-        elif joystick_mode == 'right_long_time':
-            self.get_logger().info('Right long press - reserved for future use')
-
-        elif joystick_mode == 'left_long_time':
-            self.get_logger().info('Left long press - reserved for future use')
-
+        if self._prepared_record_task_info is None:
+            self.get_logger().warning(
+                'Record trigger ignored: prepare the Record session first')
+            return
+        if recording_action == RECORD_TOGGLE_ACTION:
+            if snapshot_on_recording:
+                self._stop_record_trigger_segment()
+            else:
+                self._start_record_trigger_segment(
+                    int(self._trigger_record_next_segment_index)
+                )
+        elif recording_action == RECORD_CANCEL_ACTION and snapshot_on_recording:
+            self._cancel_record_trigger_segment()
         else:
-            self.get_logger().info(f'Unknown joystick trigger: {joystick_mode}')
+            self.get_logger().debug(
+                'Record trigger cancel ignored: no active recording')
 
     # _auto_create_recording_session removed in Step 3 Part C2d-5 — the
     # joystick handler now reuses self._last_ui_task_info + forwards START

@@ -84,7 +84,10 @@ def _install_ros_stubs():
 _install_ros_stubs()
 
 from orchestrator.bt.actions.joint_control import _coerce_positions  # noqa: E402
-from orchestrator.bt.actions.send_command import SendCommand  # noqa: E402
+from orchestrator.bt.actions.send_command import (  # noqa: E402
+    SendCommand,
+    _service_type_from_model,
+)
 from orchestrator.bt.node_registry import _annotation_to_port_type  # noqa: E402
 
 
@@ -168,3 +171,27 @@ def test_load_send_command_sets_action_request_mode():
 
     assert action.action_request_mode == 'sync'
     assert task_info.action_request_mode == 'sync'
+
+
+def test_load_send_command_preserves_step_sync_mode():
+    context = types.SimpleNamespace(node=_DummyNode())
+
+    action = SendCommand.from_xml_params(
+        context,
+        'LoadInference',
+        {
+            'command': 'LOAD',
+            'action_request_mode': 'sync_step',
+        },
+    )
+    task_info = action._build_task_info()
+
+    assert action.action_request_mode == 'sync_step'
+    assert task_info.action_request_mode == 'sync_step'
+
+
+def test_vitacformer_models_route_to_dedicated_backend():
+    assert _service_type_from_model('vitacformer:vitacformer') == 'vitacformer'
+    assert _service_type_from_model('vitacformer') == 'vitacformer'
+    # Keep saved BTs created before the backend split working.
+    assert _service_type_from_model('lerobot:vitacformer') == 'vitacformer'

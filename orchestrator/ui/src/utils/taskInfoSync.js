@@ -1,4 +1,8 @@
 import PageType from '../constants/pageType';
+import {
+  defaultInferenceHz,
+  resolveActionRequestMode,
+} from '../constants/policyCapabilities';
 
 const stringArray = (items) => (
   Array.isArray(items) ? items.map((item) => String(item ?? '')) : []
@@ -39,12 +43,19 @@ export const normalizeInferenceTaskInfo = (taskInfo = {}) => ({
   policyPath: String(taskInfo.policyPath ?? '').trim(),
   recordInferenceMode: Boolean(taskInfo.recordInferenceMode),
   controlHz: numberOrDefault(taskInfo.controlHz ?? 100, 100),
-  inferenceHz: numberOrDefault(taskInfo.inferenceHz ?? 15, 15),
+  inferenceHz: numberOrDefault(
+    taskInfo.inferenceHz,
+    defaultInferenceHz(taskInfo.serviceType, taskInfo.policyType)
+  ),
   chunkAlignWindowS: numberOrDefault(taskInfo.chunkAlignWindowS ?? 0.3, 0.3),
   serviceType: String(taskInfo.serviceType ?? '').trim(),
   policyType: String(taskInfo.policyType ?? '').trim(),
   inferenceMode: String(taskInfo.inferenceMode ?? 'simulation').trim() || 'simulation',
-  actionRequestMode: actionRequestModeOrDefault(taskInfo.actionRequestMode),
+  actionRequestMode: resolveActionRequestMode(
+    taskInfo.serviceType,
+    taskInfo.policyType,
+    taskInfo.actionRequestMode
+  ),
   accelerationMode: String(taskInfo.accelerationMode ?? 'pytorch').trim(),
   accelerationEnginePath: String(taskInfo.accelerationEnginePath ?? '').trim(),
 });

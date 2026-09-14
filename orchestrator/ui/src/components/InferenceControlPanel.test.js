@@ -42,6 +42,7 @@ const renderPanel = ({
   inferencePhase = InferencePhase.READY,
   taskOverrides = {},
   sendRecordCommand: sendOverride = null,
+  switchState = {},
 } = {}) => {
   const sendRecordCommand = sendOverride || jest.fn().mockResolvedValue({
     success: true,
@@ -62,6 +63,7 @@ const renderPanel = ({
     preloadedState: {
       tasks: {
         ...initialTasks,
+        inferenceModelSwitch: { ...initialTasks.inferenceModelSwitch, ...switchState },
         sharedTaskInfo: {
           ...initialTasks.sharedTaskInfo,
           taskInstruction: sharedTaskInstruction,
@@ -102,6 +104,45 @@ const renderPanel = ({
 describe('InferenceControlPanel deploy safety', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  test('keeps Stop available and blocks Start, Clear and Cycle Home during switching', () => {
+    renderPanel({ inferencePhase: InferencePhase.LOADING, switchState: { busy: true } });
+    expect(screen.getByRole('button', { name: /pause inference/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /^start inference$/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /stop inference and unload/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /return to the task start pose/i })).toBeDisabled();
+  });
+
+  test('paused model resumes after mounting the panel without a local start history', async () => {
+    const { sendRecordCommand } = renderPanel({ inferencePhase: InferencePhase.PAUSED, inferenceMode: 'simulation' });
+    fireEvent.click(screen.getByRole('button', { name: /resume inference/i }));
+    await waitFor(() => expect(sendRecordCommand).toHaveBeenCalledWith('resume_inference', { inferenceMode: 'simulation' }));
+  });
+
+  test('shows fresh-cycle acknowledgement instead of a generic Resume success', async () => {
+    const message = 'Fresh inference cycle started after Cycle Home';
+    renderPanel({
+      inferencePhase: InferencePhase.PAUSED,
+      inferenceMode: 'simulation',
+      sendRecordCommand: jest.fn().mockResolvedValue({ success: true, message }),
+    });
+    fireEvent.click(screen.getByRole('button', { name: /resume inference/i }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(message));
+    expect(toast.success).not.toHaveBeenCalledWith('Resume executed successfully');
+  });
+
+  test.each([InferencePhase.READY, InferencePhase.PAUSED])('preloading blocks starting and unloading in phase %s', (inferencePhase) => {
+    renderPanel({ inferencePhase, switchState: { preloadBusy: true } });
+    expect(screen.getByRole('button', { name: /^(start|resume) inference$/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /stop inference and unload/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /return to the task start pose/i })).toBeDisabled();
+  });
+
+  test('unknown switch outcome blocks resume and still permits Stop while loading', () => {
+    renderPanel({ inferencePhase: InferencePhase.LOADING, switchState: { needsClear: true } });
+    expect(screen.getByRole('button', { name: /pause inference/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /^start inference$/i })).toBeDisabled();
   });
 
   test('shows a warning instead of starting immediately for Real Robot Deploy', async () => {
@@ -192,6 +233,70 @@ describe('InferenceControlPanel deploy safety', () => {
     await waitFor(() => {
       expect(sendRecordCommand).not.toHaveBeenCalled();
     });
+  });
+
+  test('Cycle Home pauses and requests task pose return for Real Tactile ACT', async () => {
+    const { sendRecordCommand } = renderPanel({
+      inferenceMode: 'robot',
+      inferencePhase: InferencePhase.INFERENCING,
+      taskOverrides: {
+        serviceType: 'lerobot',
+        policyType: 'tactile_act',
+      },
+    });
+
+    fireEvent.click(screen.getByRole('button', {
+      name: /return to the task start pose/i,
+    }));
+
+    await waitFor(() => {
+      expect(sendRecordCommand).toHaveBeenCalledWith('prepare_next_cycle', {});
+    });
+  });
+
+  test('Cycle Home is available for Real ViTacFormer inference', () => {
+    renderPanel({
+      inferenceMode: 'robot',
+      inferencePhase: InferencePhase.INFERENCING,
+      taskOverrides: {
+        serviceType: 'vitacformer',
+        policyType: 'vitacformer',
+      },
+    });
+
+    expect(screen.getByRole('button', {
+      name: /return to the task start pose/i,
+    })).toBeEnabled();
+  });
+
+  test('Cycle Home remains available after a Real safety gate pauses inference', () => {
+    renderPanel({
+      inferenceMode: 'robot',
+      inferencePhase: InferencePhase.PAUSED,
+      taskOverrides: {
+        serviceType: 'vitacformer',
+        policyType: 'vitacformer',
+      },
+    });
+
+    expect(screen.getByRole('button', {
+      name: /return to the task start pose/i,
+    })).toBeEnabled();
+  });
+
+  test('Cycle Home stays disabled outside Real Tactile ACT inference', () => {
+    renderPanel({
+      inferenceMode: 'simulation',
+      inferencePhase: InferencePhase.INFERENCING,
+      taskOverrides: {
+        serviceType: 'lerobot',
+        policyType: 'tactile_act',
+      },
+    });
+
+    expect(screen.getByRole('button', {
+      name: /return to the task start pose/i,
+    })).toBeDisabled();
   });
 
   test('requires shared task instruction for language-conditioned inference', async () => {

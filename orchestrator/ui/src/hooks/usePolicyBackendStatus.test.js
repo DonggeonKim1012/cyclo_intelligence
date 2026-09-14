@@ -1,6 +1,14 @@
-import { getPolicyBackendReadiness } from './usePolicyBackendStatus';
+import {
+  getPolicyBackendName,
+  getPolicyBackendReadiness,
+} from './usePolicyBackendStatus';
 
 describe('getPolicyBackendReadiness', () => {
+  it('routes ViTacFormer to its independent backend', () => {
+    expect(getPolicyBackendName('vitacformer')).toBe('vitacformer');
+    expect(getPolicyBackendName('lerobot')).toBe('lerobot');
+    expect(getPolicyBackendName('groot')).toBe('groot');
+  });
   it('blocks inference start when the backend container image is stale', () => {
     const readiness = getPolicyBackendReadiness({
       image_pulled: true,

@@ -48,13 +48,18 @@ finally:
 _missing_required_mounts = app._missing_required_mounts
 _mount_source_for_destination = app._mount_source_for_destination
 _backend_container_image_mismatch = app._backend_container_image_mismatch
+_backend_container_runtime_profile_mismatch = (
+    app._backend_container_runtime_profile_mismatch
+)
 _backend_container_stale_reason = app._backend_container_stale_reason
+_compose_base_cmd = app._compose_base_cmd
 _compose_env = app._compose_env
 _host_workspace_dir = app._host_workspace_dir
 _require_known_service = app._require_known_service
 _validate_bt_robot_type = app._validate_bt_robot_type
 _validate_robot_type = app._validate_robot_type
 _write_bt_robot_type = app._write_bt_robot_type
+_validate_lerobot_runtime_profile = app._validate_lerobot_runtime_profile
 _resolve_groot_trt_paths = app._resolve_groot_trt_paths
 _trt_status = app._trt_status
 _BACKENDS = app._BACKENDS
@@ -63,6 +68,7 @@ navigation = sys.modules["supervisor_api.navigation"]
 navigation_grid_cache = sys.modules["supervisor_api.navigation_grid_cache"]
 _GROOT_REQUIRED_MOUNTS = app._REQUIRED_BACKEND_MOUNTS["groot"]
 _LEROBOT_REQUIRED_MOUNTS = app._REQUIRED_BACKEND_MOUNTS["lerobot"]
+_VITACFORMER_REQUIRED_MOUNTS = app._REQUIRED_BACKEND_MOUNTS["vitacformer"]
 
 
 def test_navigation_parses_binary_pgm():
@@ -249,6 +255,12 @@ def test_missing_required_mounts_accepts_current_lerobot_container():
     assert _missing_required_mounts("lerobot", container) == []
 
 
+def test_missing_required_mounts_accepts_baked_vitacformer_container():
+    container = _container_with_mounts(*_VITACFORMER_REQUIRED_MOUNTS)
+
+    assert _missing_required_mounts("vitacformer", container) == []
+
+
 def test_backend_container_image_mismatch_detects_old_container_image():
     class FakeImages:
         def get(self, image):
@@ -279,6 +291,76 @@ def test_backend_container_image_mismatch_accepts_current_container_image():
         container,
         spec,
     )
+
+
+def test_validate_lerobot_runtime_profile_rejects_unknown_value():
+    import pytest
+
+    assert _validate_lerobot_runtime_profile(" hand-act ") == "hand-act"
+    assert _validate_lerobot_runtime_profile("") == "default"
+    with pytest.raises(RuntimeError, match="default.*hand-act"):
+        _validate_lerobot_runtime_profile("unknown")
+
+
+def test_backend_container_runtime_profile_mismatch(monkeypatch):
+    monkeypatch.setattr(app, "_LEROBOT_RUNTIME_PROFILE", "hand-act")
+    old_container = SimpleNamespace(attrs={"Config": {"Env": []}})
+    current_container = SimpleNamespace(
+        attrs={
+            "Config": {
+                "Env": ["CYCLO_LEROBOT_RUNTIME_PROFILE=hand-act"],
+            },
+        }
+    )
+
+    assert _backend_container_runtime_profile_mismatch(
+        "lerobot", old_container
+    )
+    assert not _backend_container_runtime_profile_mismatch(
+        "lerobot", current_container
+    )
+    assert not _backend_container_runtime_profile_mismatch(
+        "groot", old_container
+    )
+
+
+def test_compose_base_cmd_layers_hand_act_last(monkeypatch, tmp_path):
+    compose_file = tmp_path / "docker-compose.yml"
+    standard_override = tmp_path / "docker-compose.override.yml"
+    trex_override = tmp_path / "docker-compose.trex.yml"
+    hand_act_override = tmp_path / "docker-compose.hand-act.yml"
+    for path in (
+        compose_file,
+        standard_override,
+        trex_override,
+        hand_act_override,
+    ):
+        path.write_text("services: {}\n")
+
+    monkeypatch.setattr(app, "_COMPOSE_FILE_IN_CONTAINER", str(compose_file))
+    monkeypatch.setattr(
+        app,
+        "_COMPOSE_OVERRIDE_IN_CONTAINER",
+        str(standard_override),
+    )
+    monkeypatch.setattr(app, "_LEROBOT_POLICY_FLAVOR", "trex")
+    monkeypatch.setattr(app, "_LEROBOT_RUNTIME_PROFILE", "hand-act")
+    monkeypatch.setattr(app, "_host_project_dir", lambda: None)
+
+    command = _compose_base_cmd()
+
+    assert command == [
+        "docker",
+        "compose",
+        "-f",
+        str(compose_file),
+        "-f",
+        str(standard_override),
+        "-f",
+        str(trex_override),
+        "-f",
+        str(hand_act_override),
+    ]
 
 
 def test_backend_container_stale_reason_detects_workspace_mount_mismatch():
@@ -455,8 +537,8 @@ def test_compose_uses_repo_local_workspace_mounts():
 
     assert "CYCLO_WORKSPACE_DIR" not in compose
     assert "CYCLO_HUGGINGFACE_DIR" not in compose
-    assert compose.count("./workspace:/workspace") == 3
-    assert compose.count("./huggingface:/root/.cache/huggingface") == 3
+    assert compose.count("./workspace:/workspace") == 4
+    assert compose.count("./huggingface:/root/.cache/huggingface") == 4
 
 
 def test_container_helper_does_not_export_workspace_mount_overrides():
@@ -568,6 +650,15 @@ def test_groot_backend_uses_current_release_image():
         _BACKENDS["groot"]["image"]
         == f"robotis/groot-zenoh:1.3.4-{app._BACKEND_ARCH}"
     )
+
+
+def test_vitacformer_backend_uses_dedicated_release_image():
+    assert _BACKENDS["vitacformer"] == {
+        "service": "vitacformer",
+        "container": "vitacformer_server",
+        "image": f"robotis/vitacformer-zenoh:1.0.0-{app._BACKEND_ARCH}",
+        "services": ["main-runtime", "engine-process"],
+    }
 
 
 def test_backend_status_model_exposes_stale_image_status():

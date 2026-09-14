@@ -6,6 +6,8 @@ import unittest
 import importlib.util
 from pathlib import Path
 
+import numpy as np
+
 
 robot_client_stub = types.ModuleType("robot_client")
 robot_client_stub.RobotClient = object
@@ -24,6 +26,11 @@ io_mapping = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = io_mapping
 spec.loader.exec_module(io_mapping)
 IoMappingMixin = io_mapping.IoMappingMixin
+from lerobot_engine.tactile_runtime import (
+    TACTILE_MODE_BOTH_EPISODE_BASELINE,
+    TACTILE_MODE_LEFT_ZERO_RIGHT_BASELINE,
+    TACTILE_RUNTIME_MODE_FIELD,
+)
 
 
 class IoMappingCameraAliasTest(unittest.TestCase):
@@ -88,6 +95,75 @@ class IoMappingCameraAliasTest(unittest.TestCase):
                 "cam_left_wrist": "observation.images.cam_wrist_left",
                 "cam_right_wrist": "observation.images.cam_wrist_right",
             },
+        )
+
+    def test_maps_scene_and_unprefixed_wrist_keys(self):
+        self.assertEqual(
+            IoMappingMixin._resolve_camera_mappings(
+                ["rgb.cam_left_head", "rgb.cam_left_wrist", "rgb.cam_right_wrist"],
+                {
+                    "observation.images.scene",
+                    "observation.images.wrist_left",
+                    "observation.images.wrist_right",
+                },
+            ),
+            {
+                "rgb.cam_left_head": "observation.images.scene",
+                "rgb.cam_left_wrist": "observation.images.wrist_left",
+                "rgb.cam_right_wrist": "observation.images.wrist_right",
+            },
+        )
+
+    @staticmethod
+    def _tactile_mapper(mode):
+        mapper = IoMappingMixin()
+        config = types.SimpleNamespace()
+        setattr(config, TACTILE_RUNTIME_MODE_FIELD, mode)
+        mapper._policy = types.SimpleNamespace(config=config)
+        mapper._tactile_inputs = {
+            "observation.tactile.left": "tactile_left",
+            "observation.tactile.right": "tactile_right",
+        }
+        samples = {
+            "tactile_left": np.tile(
+                np.asarray([[[2.0, 4.0]]], dtype=np.float32),
+                (20, 1, 1, 1),
+            ),
+            "tactile_right": np.tile(
+                np.asarray([[[1.0, 3.0]]], dtype=np.float32),
+                (20, 1, 1, 1),
+            ),
+        }
+        mapper._robot = types.SimpleNamespace(
+            wait_for_tactile_samples=lambda sensor_name, **_kwargs: samples[
+                sensor_name
+            ]
+        )
+        return mapper
+
+    def test_tactile_act_calibrates_both_hands(self):
+        mapper = self._tactile_mapper(
+            TACTILE_MODE_BOTH_EPISODE_BASELINE
+        )
+
+        baselines = mapper._calibrate_tactile_inputs()
+
+        self.assertEqual(set(baselines), set(mapper._tactile_inputs))
+        np.testing.assert_allclose(
+            baselines["observation.tactile.left"],
+            [[[2.0, 4.0]]],
+        )
+
+    def test_legacy_mode_skips_left_hand_calibration(self):
+        mapper = self._tactile_mapper(
+            TACTILE_MODE_LEFT_ZERO_RIGHT_BASELINE
+        )
+
+        baselines = mapper._calibrate_tactile_inputs()
+
+        self.assertEqual(
+            set(baselines),
+            {"observation.tactile.right"},
         )
 
 

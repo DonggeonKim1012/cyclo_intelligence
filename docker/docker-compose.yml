@@ -1,6 +1,6 @@
 # cyclo_intelligence — Docker Compose
 #
-# Two services:
+# Policy/runtime services:
 #   cyclo_intelligence   main image (PLAN §4.5) — orchestrator +
 #                         cyclo_data + UI + nginx + s6-agent. Always
 #                         started first.
@@ -75,6 +75,7 @@ services:
       - CYCLO_VIDEO_SERVER_PORT=${CYCLO_VIDEO_SERVER_PORT:-7082}
       - CYCLO_WEB_VIDEO_SERVER_PORT=${CYCLO_WEB_VIDEO_SERVER_PORT:-7085}
       - CYCLO_SUPERVISOR_API_PORT=${CYCLO_SUPERVISOR_API_PORT:-7100}
+      - CYCLO_LEROBOT_POLICY_FLAVOR=${CYCLO_LEROBOT_POLICY_FLAVOR:-default}
       # LOAD may include first-time gated backbone downloads (e.g. Cosmos).
       # Keep this long enough that a real download is not surfaced as a
       # false model-load failure while the container continues downloading.
@@ -157,6 +158,7 @@ services:
       network: host
       args:
         GPU_ARCH: ${GPU_ARCH:-default}
+        LEROBOT_POLICY_FLAVOR: ${LEROBOT_POLICY_FLAVOR:-default}
 
     # Main runtime's control loop tries SCHED_FIFO — let the kernel grant it.
     cap_add:
@@ -226,6 +228,65 @@ services:
 
     # Policy containers are started on demand by the UI/supervisor API.
     # Do not auto-start them on host boot.
+    restart: "no"
+    runtime: nvidia
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "S6_SVSTAT=$$(ls /package/admin/s6-*/command/s6-svstat 2>/dev/null | head -1); [ -n \"$$S6_SVSTAT\" ] && \"$$S6_SVSTAT\" /run/service/main-runtime | grep -q '^up ' && \"$$S6_SVSTAT\" /run/service/engine-process | grep -q '^up '",
+        ]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+
+  # ============================================================
+  # Dedicated SH5 ViTacFormer policy container.
+  # The engine/runtime/SDK code is baked into this image; only runtime data
+  # and robot configuration are mounted from the host.
+  # ============================================================
+  vitacformer:
+    container_name: vitacformer_server
+    image: robotis/vitacformer-zenoh:1.0.0-${ARCH:-arm64}
+    build:
+      context: ../cyclo_brain
+      dockerfile: policy/vitacformer/Dockerfile.${ARCH:-arm64}
+      network: host
+
+    cap_add:
+      - SYS_NICE
+    ulimits:
+      rtprio: 99
+      rttime: -1
+      memlock: 8428281856
+
+    network_mode: host
+    ipc: host
+
+    environment:
+      - POLICY_DIAGNOSTIC_TRACE_DIR=${VITACFORMER_DIAGNOSTIC_TRACE_DIR:-/workspace/diagnostics/vitacformer}
+      - LOAD_POLICY_TIMEOUT_S=${LOAD_POLICY_TIMEOUT_S:-7200}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - PYTHONUNBUFFERED=1
+
+    volumes:
+      - /dev:/dev
+      - /dev/shm:/dev/shm
+      - ./workspace:/workspace
+      - ./huggingface:/root/.cache/huggingface
+      - ./zenoh_cache:/root/.cache/zenoh_ros2_sdk:rw
+      - ../shared/shared/robot_configs:/orchestrator_config:ro
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+
     restart: "no"
     runtime: nvidia
     healthcheck:

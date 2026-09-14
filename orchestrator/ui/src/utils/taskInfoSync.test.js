@@ -3,6 +3,7 @@ import PageType from '../constants/pageType';
 import {
   getInferenceTaskInfoKey,
   hasRosTaskInfoPayload,
+  normalizeInferenceTaskInfo,
   shouldApplyServerTaskInfoToPage,
 } from './taskInfoSync';
 
@@ -92,5 +93,19 @@ describe('taskInfoSync echo routing', () => {
       inferenceHz: 15,
       chunkAlignWindowS: 0.3,
     }));
+  });
+
+  test('normalizes a blank ACT rate to 30 Hz without changing other policies', () => {
+    expect(normalizeInferenceTaskInfo({
+      serviceType: 'lerobot',
+      policyType: 'act',
+      inferenceHz: '',
+    }).inferenceHz).toBe(30);
+
+    expect(normalizeInferenceTaskInfo({
+      serviceType: 'lerobot',
+      policyType: 'trex',
+      inferenceHz: '',
+    }).inferenceHz).toBe(15);
   });
 });

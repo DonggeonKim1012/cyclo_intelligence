@@ -129,6 +129,18 @@ string message
 # Message Definitions (msg)
 # ============================================================
 
+# --- InferenceStatus (interfaces/msg/InferenceStatus.msg) ---
+INFERENCE_STATUS_DEF = """\
+uint8 READY = 0
+uint8 LOADING = 1
+uint8 INFERENCING = 2
+uint8 PAUSED = 3
+
+string robot_type
+uint8 inference_phase
+string error
+"""
+
 # --- TrainingProgress (interfaces/msg/TrainingProgress.msg) ---
 TRAINING_PROGRESS_DEF = """\
 int32 step
