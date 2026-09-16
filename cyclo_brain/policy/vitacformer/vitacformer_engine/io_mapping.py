@@ -37,6 +37,7 @@ class IoMappingMixin:
         self._robot = RobotClient(
             robot_type,
             requested_camera_names={CAMERA_NAME},
+            enable_tactile=True,
         )
         if CAMERA_NAME not in self._robot.camera_names:
             raise RuntimeError(
@@ -181,4 +182,3 @@ class IoMappingMixin:
             self._robot.close()
         finally:
             self._robot = None
-

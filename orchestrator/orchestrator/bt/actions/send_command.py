@@ -144,21 +144,27 @@ MODEL_SERVICE_TYPES = {
     'lerobot': 'lerobot',
     'lerobot:act': 'lerobot',
     'lerobot:diffusion': 'lerobot',
+    # Preserve old BT files, but route ViTacFormer to its dedicated backend.
+    'lerobot:vitacformer': 'vitacformer',
     'lerobot:smolvla': 'lerobot',
     'lerobot:xvla': 'lerobot',
     'lerobot:pi0': 'lerobot',
     'lerobot:pi05': 'lerobot',
     'lerobot:molmoact2': 'lerobot',
     'lerobot:vla_jepa': 'lerobot',
+    'lerobot:trex': 'lerobot',
     'lerobot:fastwam': 'lerobot',
     'act': 'lerobot',
     'diffusion': 'lerobot',
+    'vitacformer': 'vitacformer',
+    'vitacformer:vitacformer': 'vitacformer',
     'smolvla': 'lerobot',
     'xvla': 'lerobot',
     'pi0': 'lerobot',
     'pi05': 'lerobot',
     'molmoact2': 'lerobot',
     'vla_jepa': 'lerobot',
+    'trex': 'lerobot',
     'fastwam': 'lerobot',
 }
 
@@ -177,6 +183,10 @@ def _service_type_from_model(model: str) -> str:
 
 def _normalize_action_request_mode(value: str) -> str:
     mode = str(value or '').strip().lower()
+    if mode in {'async_ordered', 'ordered_async'}:
+        return 'async_ordered'
+    if mode in {'sync_step', 'step_sync'}:
+        return 'sync_step'
     if mode == 'sync':
         return 'sync'
     return 'async'

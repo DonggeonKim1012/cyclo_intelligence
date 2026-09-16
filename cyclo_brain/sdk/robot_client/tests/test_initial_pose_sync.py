@@ -66,6 +66,7 @@ class InitialPoseSyncCommandTest(unittest.TestCase):
         client._joint_velocities = {}
         client._joint_efforts = {}
         client._joint_timestamps = {}
+        client._joint_history_samples = {}
         client._joint_children = {}
         client._lock = threading.Lock()
         client._cmd_vel_linear_deadband = 0.0
@@ -79,6 +80,49 @@ class InitialPoseSyncCommandTest(unittest.TestCase):
                 cfg.get("joint_names", [])
             )
         return client
+
+    def test_runtime_config_gates_tactile_subscriptions_by_default(self) -> None:
+        section = robot_client_impl.robot_schema.load_robot_section("ffw_sh5_rev1")
+
+        default_config = robot_client_impl._build_runtime_config(section)
+        tactile_config = robot_client_impl._build_runtime_config(
+            section,
+            enable_tactile=True,
+        )
+
+        self.assertEqual(default_config["tactile_modalities"], [])
+        self.assertFalse(
+            any(
+                name.startswith("tactile_")
+                for name in default_config["sensors"]
+            )
+        )
+        self.assertEqual(
+            set(tactile_config["tactile_modalities"]),
+            {"tactile_left_hand_pressure", "tactile_right_hand_pressure"},
+        )
+
+    def test_physical_joint_group_getter_preserves_raw_callback_vector(self) -> None:
+        client = self._make_client("ffw_sh5_rev1")
+        client._joint_history_samples = {}
+        client._sensors = {}
+        client._sensor_timestamps = {}
+        client._tactile_calibration_samples = {}
+        client._tactile_history_samples = {}
+        group = "follower_upper_body"
+        msg = SimpleNamespace(
+            name=["arm_l_joint1", "arm_l_joint2", "extra_joint"],
+            position=[1.0, 2.0, 99.0],
+            velocity=[],
+            effort=[],
+        )
+
+        client._update_joint(group, msg)
+
+        np.testing.assert_allclose(
+            client.get_joint_positions(group),
+            np.asarray([1.0, 2.0, 99.0], dtype=np.float32),
+        )
 
     def test_joint_state_max_age_environment_override_and_fallback(self) -> None:
         with mock.patch.object(RobotClient, "_init_subscriptions"):

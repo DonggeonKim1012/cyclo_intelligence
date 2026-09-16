@@ -26,6 +26,7 @@ import {
   MdPrecisionManufacturing,
   MdViewInAr,
   MdWarningAmber,
+  MdReplay,
 } from 'react-icons/md';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import Tooltip from './Tooltip';
@@ -35,6 +36,7 @@ import {
   selectInferenceTaskInfo,
   setInferenceMode,
   setInferenceStatus,
+  setInferenceModelSwitch,
 } from '../features/tasks/taskSlice';
 import { requiresInstruction } from '../constants/policyCapabilities';
 import usePolicyBackendStatus, {
@@ -86,11 +88,13 @@ export default function InferenceControlPanel() {
   const dispatch = useDispatch();
   const taskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
+  const isSwitchingModel = useSelector((state) => Boolean(state.tasks.inferenceModelSwitch?.busy));
+  const isPreloadingModel = useSelector((state) => Boolean(state.tasks.inferenceModelSwitch?.preloadBusy));
+  const switchNeedsClear = useSelector((state) => Boolean(state.tasks.inferenceModelSwitch?.needsClear));
   const rosHost = useSelector((state) => state.ros.rosHost);
 
   const [hovered, setHovered] = useState(null);
   const [pressed, setPressed] = useState(null);
-  const [lastPolicyPath, setLastPolicyPath] = useState('');
   const [spinnerIndex, setSpinnerIndex] = useState(0);
   const [pendingRobotDeployIntent, setPendingRobotDeployIntent] = useState(null);
 
@@ -106,6 +110,7 @@ export default function InferenceControlPanel() {
   const isPaused = phase === InferencePhase.PAUSED;
   const isSyncing = phase === InferencePhase.SYNCING;
   const inferencePhaseRef = useRef(phase);
+  const loadedPolicyPathRef = useRef('');
   const isModelLoaded = isInferencing || isPaused || isSyncing;
   const shouldCheckBackend = isIdle || isPaused;
 
@@ -238,11 +243,19 @@ export default function InferenceControlPanel() {
           // Backend may have left phase in LOADING/INFERENCING after a failed
           // setup; force the local phase back to READY so the panel becomes
           // editable and the user can retry.
-          if (!shouldPreserveSyncAfterFailure()) {
+          if (
+            !['stop_inference', 'resume_inference', 'prepare_next_cycle'].includes(commandString) &&
+            !shouldPreserveSyncAfterFailure()
+          ) {
             dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
           }
         } else if (result && result.success === true) {
-          toast.success(`${commandName} executed successfully`);
+          if (commandString === 'finish') {
+            loadedPolicyPathRef.current = '';
+          }
+          const lifecycleMessage = ['start_inference', 'resume_inference', 'prepare_next_cycle']
+            .includes(commandString) ? result.message : null;
+          toast.success(lifecycleMessage || `${commandName} executed successfully`);
         } else {
           toast.error(`${commandName} completed with uncertain status`);
           if (!shouldPreserveSyncAfterFailure()) {
@@ -269,7 +282,10 @@ export default function InferenceControlPanel() {
           toast.error(`Command failed [${commandName}]: ${errorMessage}`);
         }
         // Same reasoning as the success===false branch above.
-        if (!shouldPreserveSyncAfterFailure()) {
+        if (
+          !['stop_inference', 'resume_inference', 'prepare_next_cycle'].includes(commandString) &&
+          !shouldPreserveSyncAfterFailure()
+        ) {
           dispatch(setInferenceStatus({ inferencePhase: InferencePhase.READY }));
         }
         return null;
@@ -280,12 +296,13 @@ export default function InferenceControlPanel() {
 
   const executeStartIntent = useCallback(async (intent, inferenceMode) => {
     if (!intent) return;
-    if (intent.policyPath) {
-      setLastPolicyPath(intent.policyPath);
-    }
-    await executeCommand(intent.commandName, intent.commandString, {
+    const result = await executeCommand(intent.commandName, intent.commandString, {
       inferenceMode,
     });
+    if (result?.success && intent.commandString === 'start_inference') {
+      loadedPolicyPathRef.current = String(intent.policyPath || '').trim();
+    }
+    return result;
   }, [executeCommand]);
 
   const handleStart = useCallback(async () => {
@@ -305,7 +322,13 @@ export default function InferenceControlPanel() {
     }
 
     let startIntent;
-    if (isPaused && taskInfo.policyPath === lastPolicyPath) {
+    const requestedPolicyPath = String(taskInfo.policyPath || '').trim();
+    const loadedPolicyPath = String(loadedPolicyPathRef.current || '').trim();
+    const canResumePausedPolicy = (
+      isPaused &&
+      (!loadedPolicyPath || loadedPolicyPath === requestedPolicyPath)
+    );
+    if (canResumePausedPolicy) {
       startIntent = {
         commandName: 'Resume',
         commandString: 'resume_inference',
@@ -320,7 +343,7 @@ export default function InferenceControlPanel() {
       startIntent = {
         commandName: 'Start Inference',
         commandString: 'start_inference',
-        policyPath: taskInfo.policyPath,
+        policyPath: requestedPolicyPath,
       };
     }
 
@@ -370,7 +393,6 @@ export default function InferenceControlPanel() {
     taskInfo.initialPoseSyncDurationS,
     taskInfo.inferenceHz,
     taskInfo.controlHz,
-    lastPolicyPath,
     executeStartIntent,
     ensureTensorRtReady,
     validateTaskInfo,
@@ -398,16 +420,28 @@ export default function InferenceControlPanel() {
     await executeCommand('Stop', 'stop_inference');
   }, [executeCommand]);
 
-  const handleClear = useCallback(async () => {
-    const result = await executeCommand('Clear', 'finish');
-    if (result && result.success === true) {
-      setLastPolicyPath('');
-    }
+  const handleCycleHome = useCallback(async () => {
+    await executeCommand('Cycle Home', 'prepare_next_cycle');
   }, [executeCommand]);
 
-  const startEnabled = shouldCheckBackend && backendReadiness.ready;
-  const stopEnabled = isInferencing || isSyncing;
-  const clearEnabled = isModelLoaded;
+  const handleClear = useCallback(async () => {
+    const result = await executeCommand('Clear', 'finish');
+    if (result?.success) {
+      dispatch(setInferenceModelSwitch({ needsClear: false, preloadedPath: '', error: '', message: '' }));
+    }
+  }, [dispatch, executeCommand]);
+
+  const startEnabled = !isSwitchingModel && !isPreloadingModel && !switchNeedsClear && shouldCheckBackend && backendReadiness.ready;
+  const stopEnabled = isInferencing || isSyncing || isSwitchingModel || (switchNeedsClear && isLoading);
+  const cycleHomeEnabled = (
+    !isSwitchingModel && !isPreloadingModel && !switchNeedsClear && (isInferencing || isPaused) &&
+    taskInfo.inferenceMode === 'robot' &&
+    (
+      (taskInfo.serviceType === 'lerobot' && taskInfo.policyType === 'tactile_act') ||
+      (taskInfo.serviceType === 'vitacformer' && taskInfo.policyType === 'vitacformer')
+    )
+  );
+  const clearEnabled = !isSwitchingModel && !isPreloadingModel && isModelLoaded;
   const startDescription = isBackendStartBlocked
     ? backendReadiness.message
     : isPaused
@@ -531,6 +565,15 @@ export default function InferenceControlPanel() {
       handler: handleStop,
       description: 'Pause inference (model stays loaded)',
       shortcut: 'Ctrl+Shift+S',
+    },
+    {
+      label: 'Cycle Home',
+      icon: MdReplay,
+      color: '#7b1fa2',
+      enabled: cycleHomeEnabled,
+      handler: handleCycleHome,
+      description: 'Pause, return to the task start pose, then prepare a fresh cycle',
+      shortcut: 'Click',
     },
     {
       label: 'Clear',

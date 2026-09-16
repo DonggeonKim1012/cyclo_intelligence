@@ -115,4 +115,18 @@ describe('taskInfoSync echo routing', () => {
     expect(converted.initialPoseSync).toBe(false);
     expect(converted.initialPoseSyncDurationS).toBe(5.0);
   });
+
+  test('normalizes a blank ACT rate to 30 Hz without changing other policies', () => {
+    expect(normalizeInferenceTaskInfo({
+      serviceType: 'lerobot',
+      policyType: 'act',
+      inferenceHz: '',
+    }).inferenceHz).toBe(30);
+
+    expect(normalizeInferenceTaskInfo({
+      serviceType: 'lerobot',
+      policyType: 'trex',
+      inferenceHz: '',
+    }).inferenceHz).toBe(15);
+  });
 });

@@ -15,6 +15,10 @@
 // Author: Seongwoo Kim
 
 import PageType from '../constants/pageType';
+import {
+  defaultInferenceHz,
+  resolveActionRequestMode,
+} from '../constants/policyCapabilities';
 
 const stringArray = (items) => (
   Array.isArray(items) ? items.map((item) => String(item ?? '')) : []
@@ -59,7 +63,10 @@ export const normalizeInferenceTaskInfo = (taskInfo = {}) => ({
   policyPath: String(taskInfo.policyPath ?? '').trim(),
   recordInferenceMode: Boolean(taskInfo.recordInferenceMode),
   controlHz: editableNumberOrDefault(taskInfo.controlHz ?? 100, 100),
-  inferenceHz: editableNumberOrDefault(taskInfo.inferenceHz ?? 15, 15),
+  inferenceHz: editableNumberOrDefault(
+    taskInfo.inferenceHz ?? defaultInferenceHz(taskInfo.serviceType, taskInfo.policyType),
+    defaultInferenceHz(taskInfo.serviceType, taskInfo.policyType)
+  ),
   chunkAlignWindowS: editableNumberOrDefault(
     taskInfo.chunkAlignWindowS ?? 0.3,
     0.3
@@ -67,7 +74,11 @@ export const normalizeInferenceTaskInfo = (taskInfo = {}) => ({
   serviceType: String(taskInfo.serviceType ?? '').trim(),
   policyType: String(taskInfo.policyType ?? '').trim(),
   inferenceMode: String(taskInfo.inferenceMode ?? 'simulation').trim() || 'simulation',
-  actionRequestMode: actionRequestModeOrDefault(taskInfo.actionRequestMode),
+  actionRequestMode: resolveActionRequestMode(
+    taskInfo.serviceType,
+    taskInfo.policyType,
+    taskInfo.actionRequestMode
+  ),
   accelerationMode: String(taskInfo.accelerationMode ?? 'pytorch').trim(),
   accelerationEnginePath: String(taskInfo.accelerationEnginePath ?? '').trim(),
   initialPoseSync: Boolean(taskInfo.initialPoseSync),

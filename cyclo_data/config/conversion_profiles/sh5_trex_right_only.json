@@ -3,7 +3,7 @@
     "cam_right_head"
   ],
   "selected_state_topics": [
-    "/arm_hand/joint_states"
+    "/joint_states"
   ],
   "selected_action_topics": [
     "/leader/joint_trajectory_command_broadcaster_right/joint_trajectory",

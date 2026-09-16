@@ -42,6 +42,8 @@ Environment overrides:
                                       Docker container name to inspect for
                                       host-side bind mount paths
                                       (default cyclo_intelligence fallback)
+    CYCLO_LEROBOT_RUNTIME_PROFILE     LeRobot runtime Compose profile:
+                                      default | hand-act (default default)
 """
 
 from __future__ import annotations
@@ -319,6 +321,35 @@ def _detect_arch() -> str:
 
 _BACKEND_ARCH = os.environ.get("ARCH", _detect_arch())
 
+_LEROBOT_POLICY_FLAVOR = os.environ.get(
+    "CYCLO_LEROBOT_POLICY_FLAVOR", "default"
+).strip().lower()
+if _LEROBOT_POLICY_FLAVOR not in {"default", "trex"}:
+    raise RuntimeError(
+        "CYCLO_LEROBOT_POLICY_FLAVOR must be 'default' or 'trex', got "
+        f"{_LEROBOT_POLICY_FLAVOR!r}"
+    )
+_LEROBOT_IMAGE = (
+    f"robotis/lerobot-trex-zenoh:1.3.2-{_BACKEND_ARCH}"
+    if _LEROBOT_POLICY_FLAVOR == "trex"
+    else f"robotis/lerobot-zenoh:1.4.1-{_BACKEND_ARCH}"
+)
+
+
+def _validate_lerobot_runtime_profile(value: str) -> str:
+    normalized = value.strip().lower() or "default"
+    if normalized not in {"default", "hand-act"}:
+        raise RuntimeError(
+            "CYCLO_LEROBOT_RUNTIME_PROFILE must be 'default' or "
+            f"'hand-act', got {normalized!r}"
+        )
+    return normalized
+
+
+_LEROBOT_RUNTIME_PROFILE = _validate_lerobot_runtime_profile(
+    os.environ.get("CYCLO_LEROBOT_RUNTIME_PROFILE", "default")
+)
+
 
 # Image versions are hardcoded per backend below since each service has
 # its own release cadence. ARCH still falls back to a uname-based sniff
@@ -328,13 +359,19 @@ _BACKENDS: Dict[str, Dict[str, str]] = {
     "lerobot": {
         "service": "lerobot",
         "container": "lerobot_server",
-        "image": f"robotis/lerobot-zenoh:1.4.1-{_BACKEND_ARCH}",
+        "image": _LEROBOT_IMAGE,
         "services": ["main-runtime", "engine-process"],
     },
     "groot": {
         "service": "groot",
         "container": "groot_server",
         "image": f"robotis/groot-zenoh:1.3.5-{_BACKEND_ARCH}",
+        "services": ["main-runtime", "engine-process"],
+    },
+    "vitacformer": {
+        "service": "vitacformer",
+        "container": "vitacformer_server",
+        "image": f"robotis/vitacformer-zenoh:1.0.0-{_BACKEND_ARCH}",
         "services": ["main-runtime", "engine-process"],
     },
 }
@@ -400,6 +437,12 @@ _REQUIRED_BACKEND_MOUNTS: Dict[str, tuple[str, ...]] = {
         "/policy_runtime",
         "/app/groot_engine",
         "/app/runtime",
+        "/orchestrator_config",
+    ),
+    # ViTacFormer ships its runtime, engine, and SDKs in the image. Only
+    # mutable model data and the host robot configuration are required.
+    "vitacformer": (
+        "/workspace",
         "/orchestrator_config",
     ),
 }
@@ -621,6 +664,10 @@ def _compose_env() -> Dict[str, str]:
     if huggingface_dir:
         env["CYCLO_HUGGINGFACE_DIR"] = huggingface_dir
     env.setdefault("ARCH", _BACKEND_ARCH)
+    env.setdefault(
+        "CYCLO_LEROBOT_RUNTIME_PROFILE",
+        _LEROBOT_RUNTIME_PROFILE,
+    )
     return env
 
 
@@ -632,6 +679,30 @@ def _compose_base_cmd() -> List[str]:
     cmd += ["-f", _COMPOSE_FILE_IN_CONTAINER]
     if os.path.exists(_COMPOSE_OVERRIDE_IN_CONTAINER):
         cmd += ["-f", _COMPOSE_OVERRIDE_IN_CONTAINER]
+    if _LEROBOT_POLICY_FLAVOR == "trex":
+        trex_override = os.path.join(
+            os.path.dirname(_COMPOSE_FILE_IN_CONTAINER),
+            "docker-compose.trex.yml",
+        )
+        if not os.path.exists(trex_override):
+            raise RuntimeError(
+                "T-Rex LeRobot flavor selected but compose override is "
+                f"missing: {trex_override}"
+            )
+        cmd += ["-f", trex_override]
+    if _LEROBOT_RUNTIME_PROFILE == "hand-act":
+        hand_act_override = os.path.join(
+            os.path.dirname(_COMPOSE_FILE_IN_CONTAINER),
+            "docker-compose.hand-act.yml",
+        )
+        if not os.path.exists(hand_act_override):
+            raise RuntimeError(
+                "hand-act LeRobot runtime profile selected but compose "
+                f"override is missing: {hand_act_override}"
+            )
+        # Keep the runtime profile last so its rates and action processing
+        # settings win over base, local, and policy-flavor files.
+        cmd += ["-f", hand_act_override]
     return cmd
 
 
@@ -1026,6 +1097,19 @@ def _backend_container_workspace_mount_mismatch(
     )
 
 
+def _backend_container_runtime_profile_mismatch(name: str, container) -> bool:
+    """Detect a LeRobot container created for a different runtime profile."""
+    if name != "lerobot":
+        return False
+    configured_profile = "default"
+    for entry in container.attrs.get("Config", {}).get("Env", []) or []:
+        key, separator, value = entry.partition("=")
+        if separator and key == "CYCLO_LEROBOT_RUNTIME_PROFILE":
+            configured_profile = value.strip().lower() or "default"
+            break
+    return configured_profile != _LEROBOT_RUNTIME_PROFILE
+
+
 def _backend_container_stale_reason(
     name: str,
     client: docker.DockerClient,
@@ -1041,6 +1125,8 @@ def _backend_container_stale_reason(
         expected_workspace_dir,
     ):
         return "workspace_mount_mismatch"
+    if _backend_container_runtime_profile_mismatch(name, container):
+        return "runtime_profile_mismatch"
     if _backend_container_image_mismatch(client, container, spec):
         return "image_mismatch"
     return None
