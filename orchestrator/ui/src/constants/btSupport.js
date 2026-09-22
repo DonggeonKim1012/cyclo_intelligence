@@ -18,7 +18,10 @@
 // robots the behavior-tree engine supports; see features/actionCanvas/
 // btSupportSlice.js for the fetch. This default only covers the moment before
 // /api/bt/support has answered.
-export const DEFAULT_BT_SUPPORTED_ROBOT_TYPES = Object.freeze(['ffw_sg2_rev1']);
+export const DEFAULT_BT_SUPPORTED_ROBOT_TYPES = Object.freeze([
+  'ffw_sg2_rev1',
+  'ffw_sh5_rev1',
+]);
 
 export function normalizeBtSupportedRobotTypes(value) {
   const list = Array.isArray(value)

@@ -9,6 +9,14 @@ sys.path.insert(0, str(REPO_ROOT / "shared"))
 from shared.robot_configs import schema as robot_schema  # noqa: E402
 
 
+def test_bt_supports_sg2_and_sh5():
+    assert robot_schema.bt_supported_robot_types() == [
+        "ffw_sg2_rev1",
+        "ffw_sh5_rev1",
+    ]
+    assert robot_schema.is_bt_supported("ffw_sh5_rev1")
+
+
 def _assert_urdf_path_and_mesh_assets_resolve(robot_type, expected_urdf_name):
     section = robot_schema.load_robot_section(robot_type)
 

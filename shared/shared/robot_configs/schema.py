@@ -69,7 +69,7 @@ import yaml
 # Robots whose joint groups the behavior-tree engine can drive. bt_node, its
 # launch file and the supervisor API all consult this list; nothing else may
 # hard-code a robot type for the BT.
-BT_SUPPORTED_ROBOT_TYPES: tuple = ('ffw_sg2_rev1',)
+BT_SUPPORTED_ROBOT_TYPES: tuple = ('ffw_sg2_rev1', 'ffw_sh5_rev1')
 
 
 def bt_supported_robot_types() -> List[str]:

@@ -3958,10 +3958,12 @@ def test_navigation_cancel_attempts_both_before_reporting_error(monkeypatch):
 
 
 def test_bt_support_comes_from_shared_schema():
-    assert bt_support.bt_supported_robot_types() == ["ffw_sg2_rev1"]
+    assert bt_support.bt_supported_robot_types() == ["ffw_sg2_rev1", "ffw_sh5_rev1"]
     assert app._validate_bt_robot_type("") == "ffw_sg2_rev1"
+    assert app._validate_bt_robot_type("ffw_sh5_rev1") == "ffw_sh5_rev1"
     assert asyncio.run(bt_trees.bt_support_info()).supported_robot_types == [
         "ffw_sg2_rev1",
+        "ffw_sh5_rev1",
     ]
 
 

@@ -169,8 +169,8 @@ test.each([
   ],
   [
     'an unsupported robot type is selected',
-    'ffw_sh5_rev1',
-    'Autonomy Studio currently supports only ffw_sg2_rev1. Current robot type: ffw_sh5_rev1',
+    'ffw_bg2_rev4',
+    'Autonomy Studio currently supports only ffw_sg2_rev1, ffw_sh5_rev1. Current robot type: ffw_bg2_rev4',
   ],
 ])('blocks Autonomy Studio when %s', async (_scenario, robotType, message) => {
   window.sessionStorage.clear();
@@ -211,13 +211,13 @@ test.each([
   window.sessionStorage.clear();
 });
 
-test('opens the Autonomy Studio workspace chooser from the canonical navigation entry point', async () => {
+test.each(['ffw_sg2_rev1', 'ffw_sh5_rev1'])('opens Autonomy Studio for %s', async (robotType) => {
   window.sessionStorage.clear();
   mockAutonomyStudioPage.mockClear();
   toast.error.mockClear();
   act(() => {
     store.dispatch(moveToPage(PageType.HOME));
-    store.dispatch(selectRobotType('ffw_sg2_rev1'));
+    store.dispatch(selectRobotType(robotType));
   });
 
   const view = render(
