@@ -132,3 +132,9 @@ describe('transformReplayDataResult', () => {
     expect(result.bag_path).toBe('/workspace/rosbag2/sh5/0');
   });
 });
+
+test('passes recorded tactile data through the HTTP replay response', () => {
+  const tactile = { right: { timestamps: [0.1], messages: [{ sensors: [] }] } };
+  expect(transformReplayDataResult({ tactile_data: tactile }).tactile_data).toEqual(tactile);
+  expect(transformReplayDataResult({}).tactile_data).toEqual({});
+});

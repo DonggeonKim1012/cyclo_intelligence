@@ -14,6 +14,7 @@
 //
 // Author: Dongyun Kim
 
+import { encodeFilePath } from '../utils/fileUrl';
 import { useState, useEffect, useCallback, useRef } from 'react';
 
 /**
@@ -55,7 +56,7 @@ export function useHybridVideoLoader({
     const getStreamingUrl = useCallback(
         (videoFile) => {
             if (!bagPath || !videoFile) return null;
-            return `/files${bagPath}/${videoFile}`;
+            return `/files${encodeFilePath(`${bagPath}/${videoFile}`)}`;
         },
         [bagPath]
     );

@@ -45,6 +45,7 @@ const initialState = {
   jointTimestamps: [],
   jointNames: [],
   jointPositions: [],
+  tactileData: {},
 
   // Action data
   actionTimestamps: [],
@@ -91,6 +92,7 @@ const replaySlice = createSlice({
   reducers: {
     setSelectedBagPath: (state, action) => {
       state.selectedBagPath = action.payload;
+      state.tactileData = {};
       // Reset playback state when bag path changes.
       state.isLoaded = false;
       state.error = null;
@@ -116,6 +118,7 @@ const replaySlice = createSlice({
       state.jointTimestamps = data.joint_timestamps || [];
       state.jointNames = data.joint_names || [];
       state.jointPositions = data.joint_positions || [];
+      state.tactileData = data.tactile_data || {};
       state.actionTimestamps = data.action_timestamps || [];
       state.actionNames = data.action_names || [];
       state.actionValues = data.action_values || [];

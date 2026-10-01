@@ -290,6 +290,7 @@ class ReplayDataHandler:
             "joint_timestamps": [],
             "joint_names": [],
             "joint_positions": [],
+            "tactile_data": {},
             "action_timestamps": [],
             "action_names": [],
             "action_values": [],
@@ -427,6 +428,8 @@ class ReplayDataHandler:
             action_data_by_topic: Dict[
                 str, List[Tuple[float, List[str], List[float]]]
             ] = {}
+            tactile_data_by_side = {}
+            hand_pressures_type = None
             min_time = 0.0 if segment_time_map else float("inf")
             max_time = float("-inf")
 
@@ -468,6 +471,33 @@ class ReplayDataHandler:
                             )
                     except Exception as e:
                         self._log_error(f"Failed to deserialize JointState: {e}")
+
+                # Read recorded tactile values on the same bag/segment clock as joints.
+                elif topic_type == "robotis_interfaces/msg/HandPressures":
+                    side = {
+                        "/left_hand/finger_pressures": "left",
+                        "/right_hand/finger_pressures": "right",
+                    }.get(topic)
+                    if side is None:
+                        continue
+                    try:
+                        if hand_pressures_type is None:
+                            from robotis_interfaces.msg import HandPressures
+                            hand_pressures_type = HandPressures
+                        msg = deserialize_message(data, hand_pressures_type)
+                        sensors = [
+                            {
+                                "sensor_name": sensor.sensor_name,
+                                "pressure_names": list(sensor.pressure_names),
+                                "pressure_values": [int(value) for value in sensor.pressure_values],
+                            }
+                            for sensor in msg.sensors
+                        ]
+                        tactile_data_by_side.setdefault(side, []).append(
+                            (timestamp_sec, {"sensors": sensors})
+                        )
+                    except Exception as e:
+                        self._log_error(f"Failed to deserialize HandPressures: {e}")
 
                 # Handle Odometry state values from robot config.
                 elif topic_type == "nav_msgs/msg/Odometry":
@@ -676,6 +706,21 @@ class ReplayDataHandler:
             replay_sample_origin_s = (
                 min_time if math.isfinite(min_time) else 0.0
             )
+
+            # Match the joint display resolution without averaging sensor cells.
+            # Keep actual sample times so seeking never displays a future sample.
+            for side, samples in tactile_data_by_side.items():
+                buckets = {}
+                for timestamp, message in sorted(samples, key=lambda item: item[0]):
+                    bucket = self._timestamp_bucket_key(
+                        timestamp, replay_sample_bucket_s, replay_sample_origin_s
+                    )
+                    buckets[bucket] = (timestamp, message)
+                frames = [buckets[key] for key in sorted(buckets)]
+                result["tactile_data"][side] = {
+                    "timestamps": [timestamp - min_time for timestamp, _ in frames],
+                    "messages": [message for _, message in frames],
+                }
 
             # Process joint (state) data — per-topic merge
             # Multiple JointState topics have different joint counts,

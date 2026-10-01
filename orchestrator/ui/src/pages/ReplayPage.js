@@ -22,6 +22,7 @@ import clsx from 'clsx';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
 import FileBrowserModal from '../components/FileBrowserModal';
 import { prepareChartData } from '../utils/chartUtils';
+import { encodeFilePath } from '../utils/fileUrl';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import {
   setSelectedBagPath,
@@ -48,6 +49,7 @@ import ReplayLayoutContainer from '../components/layout/ReplayLayoutContainer';
 import CameraPanel from '../components/replay/CameraPanel';
 import Viewer3DPanel from '../components/replay/Viewer3DPanel';
 import JointDataPanel from '../components/replay/JointDataPanel';
+import ReplayTactilePanel from '../components/replay/ReplayTactilePanel';
 import SidebarPanel from '../components/replay/SidebarPanel';
 import TimelineControls from '../components/replay/TimelineControls';
 import { CYCLO_VIDEO_SERVER_PORT } from '../config/runtimeConfig';
@@ -84,6 +86,7 @@ function ReplayPage({ isActive }) {
     jointTimestamps,
     jointNames,
     jointPositions,
+    tactileData,
     actionTimestamps,
     actionNames,
     actionValues,
@@ -140,7 +143,7 @@ function ReplayPage({ isActive }) {
   // not nginx, because only the video server has Range support + access to
   // the rosbag2 filesystem.
   const mcapUrl = isDirectMcapMode && bagPath && mcapFile && rosHost
-    ? `http://${rosHost}:${videoServerPort || CYCLO_VIDEO_SERVER_PORT}${bagPath}/${mcapFile}`
+    ? `http://${rosHost}:${videoServerPort || CYCLO_VIDEO_SERVER_PORT}${encodeFilePath(`${bagPath}/${mcapFile}`)}`
     : null;
 
   const mcapPlayer = useMcapFramePlayer({
@@ -183,7 +186,7 @@ function ReplayPage({ isActive }) {
       if (!bagPath || !videoFiles.length) return null;
       const videoFile = videoFiles[index];
       if (!videoFile) return null;
-      return `/files${bagPath}/${videoFile}`;
+      return `/files${encodeFilePath(`${bagPath}/${videoFile}`)}`;
     },
     [bagPath, videoFiles]
   );
@@ -262,7 +265,7 @@ function ReplayPage({ isActive }) {
   );
 
   const getSegmentVideoUrl = useCallback(
-    (file) => (bagPath && file ? `/files${bagPath}/${file}` : ''),
+    (file) => (bagPath && file ? `/files${encodeFilePath(`${bagPath}/${file}`)}` : ''),
     [bagPath]
   );
 
@@ -1350,20 +1353,29 @@ function ReplayPage({ isActive }) {
                 />
               }
               jointDataPanelContent={
-                <JointDataPanel
-                  allJointNames={allJointNames}
-                  stateChartData={stateChartData}
-                  actionChartData={actionChartData}
-                  currentTime={chartCurrentTime}
-                  duration={duration}
-                  expandedJoints={expandedJoints}
-                  toggleJoint={toggleJoint}
-                  expandAllJoints={expandAllJoints}
-                  collapseAllJoints={collapseAllJoints}
-                  hasActionData={hasActionData}
-                  actionNames={actionNames}
-                  handleChartSeek={handleChartSeek}
-                />
+                <div className="flex h-full min-h-0 gap-3 overflow-x-auto">
+                  <div className="min-w-[240px] flex-1">
+                    <JointDataPanel
+                      allJointNames={allJointNames}
+                      stateChartData={stateChartData}
+                      actionChartData={actionChartData}
+                      currentTime={chartCurrentTime}
+                      duration={duration}
+                      expandedJoints={expandedJoints}
+                      toggleJoint={toggleJoint}
+                      expandAllJoints={expandAllJoints}
+                      collapseAllJoints={collapseAllJoints}
+                      hasActionData={hasActionData}
+                      actionNames={actionNames}
+                      handleChartSeek={handleChartSeek}
+                    />
+                  </div>
+                  {(robotType.toLowerCase().includes('sh5') || Object.keys(tactileData).length > 0) && (
+                    <div className="h-full w-[360px] flex-shrink-0">
+                      <ReplayTactilePanel tactileData={tactileData} currentTime={currentTime} />
+                    </div>
+                  )}
+                </div>
               }
             />
           </div>

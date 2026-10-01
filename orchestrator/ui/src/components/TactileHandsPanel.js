@@ -45,13 +45,13 @@ function FingerPressure({ side, name, sensor }) {
   );
 }
 
-function HandPressure({ side, data, now }) {
+function HandPressure({ side, data, now, replay = false }) {
   const isLive = Boolean(data) && now - data.receivedAt <= STALE_AFTER_MS;
   const displayOrder = side === 'left' ? [4, 3, 2, 1, 0] : [0, 1, 2, 3, 4];
   const validValues = (data?.fingers || []).flatMap((finger) => (
     (finger?.values || []).filter(Number.isFinite)
   ));
-  const status = !data ? 'Waiting' : !isLive ? 'Stale' : validValues.length < 45 ? 'Incomplete' : 'Live';
+  const status = !data ? (replay ? 'No sample' : 'Waiting') : !isLive ? 'Stale' : validValues.length < 45 ? 'Incomplete' : replay ? 'Recorded' : 'Live';
   const peak = validValues.length ? Math.max(...validValues) : null;
 
   return (
@@ -71,28 +71,33 @@ function HandPressure({ side, data, now }) {
   );
 }
 
-export default function TactileHandsPanel({ enabled = true }) {
-  const hands = useTactilePressureSubscription(enabled);
+export default function TactileHandsPanel({ enabled = true, replayHands, replayTime = 0 }) {
+  const replay = replayHands !== undefined;
+  const liveHands = useTactilePressureSubscription(enabled && !replay);
+  const hands = replay ? replayHands : liveHands;
   const [now, setNow] = useState(Date.now());
   const hasData = Boolean(hands.left || hands.right);
 
   useEffect(() => {
-    if (!hasData) return undefined;
+    if (replay || !hasData) return undefined;
     const timer = setInterval(() => setNow(Date.now()), 500);
     return () => clearInterval(timer);
-  }, [hasData]);
+  }, [hasData, replay]);
 
-  if (!enabled || !hasData) return null;
+  if (!enabled || (!replay && !hasData)) return null;
 
   return (
-    <div className="h-[85%] min-w-[360px] max-w-[480px] flex-1 overflow-y-auto rounded-2xl border border-slate-700 bg-gradient-to-b from-slate-800 to-slate-900 p-3 shadow-md">
+    <div className={clsx(
+      'overflow-y-auto rounded-2xl border border-slate-700 bg-gradient-to-b from-slate-800 to-slate-900 p-3 shadow-md',
+      replay ? 'h-full w-full min-w-0' : 'h-[85%] min-w-[360px] max-w-[480px] flex-1',
+    )}>
       <div className="mb-2">
         <div className="text-sm font-semibold text-white">Tactile · RAW</div>
-        <div className="text-[10px] text-slate-400">3×3 raw pressure per finger · No zeroing or smoothing</div>
+        <div className="text-[10px] text-slate-400">{replay ? `Recorded · ${replayTime.toFixed(2)} s · 3×3 raw pressure per finger` : '3×3 raw pressure per finger · No zeroing or smoothing'}</div>
       </div>
       <div className="flex flex-col gap-2">
-        <HandPressure side="left" data={hands.left} now={now} />
-        <HandPressure side="right" data={hands.right} now={now} />
+        <HandPressure side="left" data={hands.left} now={replay ? replayTime * 1000 : now} replay={replay} />
+        <HandPressure side="right" data={hands.right} now={replay ? replayTime * 1000 : now} replay={replay} />
       </div>
       <div className="mt-1.5 flex justify-between text-[9px] text-slate-400">
         <span>Cells in message order · — = unavailable</span>

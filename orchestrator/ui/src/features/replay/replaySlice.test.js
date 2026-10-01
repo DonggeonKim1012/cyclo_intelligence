@@ -16,7 +16,7 @@
  * Author: Dongyun Kim
  */
 
-import reducer, { resetReplayState, setReplayData } from './replaySlice';
+import reducer, { resetReplayState, setReplayData, setSelectedBagPath } from './replaySlice';
 
 describe('replaySlice', () => {
   test('keeps replay robot metadata for the 3D viewer', () => {
@@ -50,4 +50,13 @@ describe('replaySlice', () => {
     expect(reset.urdfPath).toBe('');
     expect(reset.endEffectorLinks).toEqual([]);
   });
+});
+
+test('clears tactile samples when switching to another episode or loading an older response', () => {
+  const tactile = { left: { timestamps: [0], messages: [{ sensors: [] }] } };
+  const loaded = reducer(undefined, setReplayData({ tactile_data: tactile }));
+  expect(loaded.tactileData).toEqual(tactile);
+  expect(reducer(loaded, setSelectedBagPath('/next')).tactileData).toEqual({});
+  expect(reducer(loaded, setReplayData({})).tactileData).toEqual({});
+  expect(reducer(loaded, resetReplayState()).tactileData).toEqual({});
 });

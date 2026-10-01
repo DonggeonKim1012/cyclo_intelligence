@@ -18,6 +18,7 @@ import { useCallback, useRef, useEffect } from 'react';
 import { shallowEqual, useSelector } from 'react-redux';
 import ROSLIB from 'roslib';
 import PageType from '../constants/pageType';
+import { encodeFilePath } from '../utils/fileUrl';
 import TaskCommand from '../constants/taskCommand';
 import TrainingCommand from '../constants/trainingCommand';
 import EditDatasetCommand from '../constants/commands';
@@ -131,6 +132,7 @@ export function transformReplayDataResult(result = {}, bagPath = '') {
     joint_timestamps: result.joint_timestamps || [],
     joint_names: result.joint_names || [],
     joint_positions: result.joint_positions || [],
+    tactile_data: result.tactile_data || {},
     action_timestamps: result.action_timestamps || [],
     action_names: result.action_names || [],
     action_values: result.action_values || [],
@@ -1015,7 +1017,7 @@ export function useRosServiceCaller() {
   const getReplayData = useCallback(
     async (bagPath) => {
       try {
-        const apiUrl = `/data-api/replay-data${bagPath}`;
+        const apiUrl = `/data-api/replay-data${encodeFilePath(bagPath)}`;
         console.log('Fetching replay data from HTTP API:', apiUrl);
 
         const response = await fetch(apiUrl);
@@ -1040,7 +1042,7 @@ export function useRosServiceCaller() {
   const getRosbagList = useCallback(
     async (folderPath) => {
       try {
-        const apiUrl = `/data-api/rosbag-list${folderPath}`;
+        const apiUrl = `/data-api/rosbag-list${encodeFilePath(folderPath)}`;
         console.log('Fetching rosbag list from HTTP API:', apiUrl);
 
         const response = await fetch(apiUrl);
