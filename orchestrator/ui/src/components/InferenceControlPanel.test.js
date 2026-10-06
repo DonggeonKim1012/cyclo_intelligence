@@ -38,6 +38,7 @@ jest.mock('../hooks/usePolicyBackendStatus', () => ({
 }));
 
 const renderPanel = ({
+  robotType = 'ffw_sh5_rev1',
   inferenceMode = 'robot',
   inferencePhase = InferencePhase.READY,
   taskOverrides = {},
@@ -63,6 +64,7 @@ const renderPanel = ({
     preloadedState: {
       tasks: {
         ...initialTasks,
+        robotType,
         inferenceModelSwitch: { ...initialTasks.inferenceModelSwitch, ...switchState },
         sharedTaskInfo: {
           ...initialTasks.sharedTaskInfo,
@@ -466,6 +468,34 @@ describe('InferenceControlPanel deploy safety', () => {
     expect(screen.getByRole('button', {
       name: /return to the task start pose/i,
     })).toBeEnabled();
+  });
+
+  test.each([InferencePhase.INFERENCING, InferencePhase.PAUSED])(
+    'Cycle Home requests a fresh SH5 GR00T cycle from phase %s', async (phase) => {
+      const { sendRecordCommand } = renderPanel({
+        inferenceMode: 'robot',
+        inferencePhase: phase,
+        robotType: 'ffw_sh5_rev1',
+        taskOverrides: { serviceType: 'groot', policyType: 'n17' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: /return to the task start pose/i }));
+      await waitFor(() => {
+        expect(sendRecordCommand).toHaveBeenCalledWith('prepare_next_cycle', {});
+      });
+    }
+  );
+
+  test.each([
+    ['ffw_sg2_rev1', 'robot'],
+    ['ffw_sh5_rev1', 'simulation'],
+  ])('GR00T Cycle Home is disabled for %s in %s mode', (robotType, inferenceMode) => {
+    renderPanel({
+      robotType,
+      inferenceMode,
+      inferencePhase: InferencePhase.INFERENCING,
+      taskOverrides: { serviceType: 'groot', policyType: 'n17' },
+    });
+    expect(screen.getByRole('button', { name: /return to the task start pose/i })).toBeDisabled();
   });
 
   test('Cycle Home stays disabled outside Real Tactile ACT inference', () => {

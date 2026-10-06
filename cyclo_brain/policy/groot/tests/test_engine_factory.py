@@ -11,6 +11,7 @@ import numpy as np
 import sys
 import types
 import unittest
+from unittest.mock import Mock
 from pathlib import Path
 
 
@@ -27,11 +28,66 @@ def _install_stub(name: str, **attrs) -> types.ModuleType:
 
 
 class GR00TEngineFactoryTests(unittest.TestCase):
+    def _set_dimensions(self, engine, widths, tactile=False):
+        state = {**widths, **({"tactile_left": 45, "tactile_right": 45} if tactile else {})}
+        engine.policy.processor.state_action_processor = types.SimpleNamespace(
+            norm_params={"new_embodiment": {
+                "state": {key: {"dim": value} for key, value in state.items()},
+                "action": {key: {"dim": value} for key, value in widths.items()},
+            }}
+        )
+
     def _module(self):
         spec = importlib.util.spec_from_file_location("groot_sh5_test", INFERENCE_ENGINE)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def test_cycle_reset_retains_weights_and_reconnects_observations(self):
+        module = self._module()
+        engine = module.GR00TInference()
+        engine.policy = types.SimpleNamespace(reset=Mock())
+        policy = engine.policy
+        old_robot = Mock()
+        new_robot = Mock()
+        new_robot.wait_for_ready.return_value = True
+        engine.robot = old_robot
+        engine._loaded_robot_type = "ffw_sh5_rev1"
+        engine._loaded_acceleration_mode = "tensorrt_dit"
+        engine._loaded_acceleration_engine_path = "/model/dit.engine"
+        engine.policy_info["action"] = list(engine.SH5_JOINT_KEYS)
+        engine.robot_info["action_keys"] = engine.SH5_JOINT_KEYS
+        def reconnect(robot_type):
+            self.assertEqual(robot_type, "ffw_sh5_rev1")
+            self.assertIsNone(engine.robot)
+            old_robot.close.assert_called_once()
+            policy.reset.assert_called_once()
+            engine.robot = new_robot
+        engine.init_robot_info = reconnect
+        result = engine.reset_cycle()
+        self.assertTrue(result["success"], result)
+        self.assertIs(engine.policy, policy)
+        self.assertEqual(engine._loaded_acceleration_mode, "tensorrt_dit")
+        self.assertEqual(engine._loaded_acceleration_engine_path, "/model/dit.engine")
+        self.assertEqual(result["action_keys"], list(engine.SH5_JOINT_KEYS.values()))
+        new_robot.wait_for_ready.assert_called_once_with(timeout=10.0)
+
+    def test_cycle_reset_failure_blocks_inference(self):
+        module = self._module()
+        engine = module.GR00TInference()
+        self.assertFalse(engine.reset_cycle()["success"])
+        engine.policy = types.SimpleNamespace(reset=Mock())
+        engine.robot = Mock()
+        engine._loaded_robot_type = "ffw_sh5_rev1"
+        new_robot = Mock()
+        new_robot.wait_for_ready.return_value = False
+        engine.init_robot_info = lambda robot_type: setattr(engine, "robot", new_robot)
+        result = engine.reset_cycle()
+        self.assertFalse(result["success"])
+        self.assertIn("did not become ready", result["message"])
+        self.assertFalse(engine.is_ready)
+        new_robot.close.assert_called_once()
+        self.assertIsNone(engine._loaded_robot_type)
 
     def test_checkpoint_tactile_detection(self):
         module = self._module()
@@ -93,6 +149,7 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         engine = module.GR00TInference()
         engine.policy = types.SimpleNamespace(processor=types.SimpleNamespace(
             use_tactile=True, tactile_state_keys=["tactile_left", "tactile_right"], tactile_input_shape=(2, 5, 9)))
+        self._set_dimensions(engine, dict(zip(engine.SH5_JOINT_KEYS, (7, 7, 20, 20))), tactile=True)
         keys = ["left_arm", "right_arm", "left_hand", "right_hand"]
         engine.policy_info = {"video": ["cam_left_head"], "state": keys + ["tactile_left", "tactile_right"],
                               "action": keys, "language": ["annotation.human.task_description"]}
@@ -127,10 +184,88 @@ class GR00TEngineFactoryTests(unittest.TestCase):
         module.RobotClient = robot_factory
         engine = module.GR00TInference()
         engine.policy = types.SimpleNamespace(processor=types.SimpleNamespace())
+        self._set_dimensions(engine, {"arm_left": 8})
         engine.policy_info = {"video": [], "state": ["arm_left"], "action": ["arm_left"], "language": []}
         engine.init_robot_info("ffw_sg2_rev1")
         self.assertEqual(captured, {})
         self.assertEqual(engine.command_action_keys(), ["arm_left"])
+
+    def test_profile_rejects_wrong_robot_and_wrong_dimensions(self):
+        module = self._module()
+        for tactile in (False, True):
+            engine = module.GR00TInference()
+            engine.policy = types.SimpleNamespace(processor=types.SimpleNamespace(use_tactile=tactile))
+            widths = dict(zip(engine.SH5_JOINT_KEYS, (7, 7, 20, 20)))
+            self._set_dimensions(engine, widths, tactile)
+            engine.policy_info["action"] = list(widths)
+            engine.policy_info["state"] = list(widths) + (["tactile_left", "tactile_right"] if tactile else [])
+            self.assertEqual(engine.validate_robot_profile("ffw_sh5_rev1"), "sh5_tactile" if tactile else "sh5")
+            with self.assertRaises(ValueError):
+                engine.validate_robot_profile("ffw_sg2_rev1")
+            params = engine.policy.processor.state_action_processor.norm_params["new_embodiment"]
+            params["action"]["left_hand"]["dim"] = 19
+            with self.assertRaisesRegex(ValueError, "expected 20"):
+                engine.validate_robot_profile("ffw_sh5_rev1")
+
+    def test_sg2_profile_accepts_22_dimensions_and_rejects_sh5(self):
+        module = self._module()
+        engine = module.GR00TInference()
+        engine.policy = types.SimpleNamespace(processor=types.SimpleNamespace(use_tactile=False))
+        widths = {"arm_left": 8, "arm_right": 8, "head": 2, "lift": 1, "odometry": 3}
+        self._set_dimensions(engine, widths)
+        engine.policy_info["action"] = list(widths)
+        engine.policy_info["state"] = list(widths)
+        self.assertEqual(engine.validate_robot_profile("ffw_sg2_rev1"), "sg2")
+        with self.assertRaises(ValueError):
+            engine.validate_robot_profile("ffw_sh5_rev1")
+
+    def test_tactile_checkpoint_allows_dit_acceleration(self):
+        module = self._module()
+        captured = {}
+        module.Gr00tPolicy = lambda **kwargs: captured.update(kwargs) or object()
+        engine = module.GR00TInference()
+        engine._sync_hf_token_for_gated_backbones = lambda: None
+        engine.init_policy_info = lambda: None
+        engine.init_robot_info = lambda robot: setattr(engine, "robot", types.SimpleNamespace(wait_for_ready=lambda **kw: True))
+        calls = []
+        engine._enable_dit_tensorrt = lambda **kw: calls.append(kw) or True
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "config.json").write_text('{"use_tactile": true}')
+            result = engine.load_policy(types.SimpleNamespace(
+                model_path=directory, robot_type="ffw_sh5_rev1", acceleration_mode="tensorrt_dit"))
+        self.assertTrue(result["success"], result)
+        self.assertTrue(captured["use_tactile"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(engine._loaded_acceleration_mode, "tensorrt_dit")
+
+    def test_trt_preparation_uses_checkpoint_tactile_setting_and_selected_robot(self):
+        from unittest.mock import Mock
+
+        runtime = self._module()
+        _install_stub("runtime")
+        _install_stub("runtime.inference_engine", GR00TInference=runtime.GR00TInference,
+                      build_trt_engine=Mock())
+        spec = importlib.util.spec_from_file_location(
+            "groot_trt_prepare_test", INFERENCE_ENGINE.with_name("prepare_trt_engine.py"))
+        prep = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(prep)
+        for tactile, robot in ((False, "ffw_sg2_rev1"), (True, "ffw_sh5_rev1")):
+            with tempfile.TemporaryDirectory() as directory:
+                (Path(directory) / "config.json").write_text(json.dumps({"use_tactile": tactile}))
+                args = types.SimpleNamespace(model_path=directory, engine_path="", force=False,
+                                             robot_type=robot, task_instruction="pick", workspace_mb=4096)
+                prep._parse_args = lambda: args
+                inference = Mock()
+                inference.checkpoint_policy_kwargs.side_effect = runtime.GR00TInference.checkpoint_policy_kwargs
+                inference.build_synthetic_observation.return_value = {"state": {}}
+                prep.GR00TInference = lambda: inference
+                prep.Gr00tPolicy = Mock()
+                def build(policy, observation, path, **kwargs):
+                    Path(path).write_bytes(b"test-engine")
+                prep.build_trt_engine = build
+                self.assertEqual(prep.main(), 0)
+                inference.validate_robot_profile.assert_called_once_with(robot)
+                self.assertEqual(prep.Gr00tPolicy.call_args.kwargs.get("use_tactile", False), tactile)
 
     def setUp(self):
         self._saved_modules = dict(sys.modules)

@@ -245,6 +245,7 @@ class GR00TInference:
     def __init__(self):
         self.policy: Optional[Gr00tPolicy] = None
         self.robot: Optional[RobotClient] = None
+        self._loaded_robot_type: Optional[str] = None
         self._loaded_model_path: Optional[str] = None  # track cached policy path
         self._loaded_acceleration_mode: str = ACCELERATION_PYTORCH
         self._loaded_acceleration_engine_path: str = ""
@@ -333,8 +334,6 @@ class GR00TInference:
             self._sync_hf_token_for_gated_backbones()
 
             policy_kwargs = self.checkpoint_policy_kwargs(model_path)
-            if policy_kwargs and acceleration_mode != ACCELERATION_PYTORCH:
-                raise RuntimeError("SH5 tactile checkpoints currently require PyTorch acceleration mode")
             self.policy = Gr00tPolicy(
                 embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
                 model_path=model_path,
@@ -709,6 +708,7 @@ class GR00TInference:
 
     def init_robot_info(self, robot_type: str) -> None:
         """Create RobotClient and resolve active cameras/joints from YAML."""
+        self.validate_robot_profile(robot_type)
         use_tactile = getattr(self.policy.processor, "use_tactile", False)
         is_sh5 = robot_type == "ffw_sh5_rev1"
         if use_tactile and not is_sh5:
@@ -787,6 +787,42 @@ class GR00TInference:
             raise ValueError(f"Unmapped policy states: {sorted(missing)}")
 
         self.logger.info("Robot info: %s", self.robot_info)
+        self._loaded_robot_type = robot_type
+
+    def validate_robot_profile(self, robot_type: str) -> str:
+        """Validate the selected Cyclo robot against the saved checkpoint.
+
+        Used by LOAD, offline smoke checks, and TensorRT preparation. Robot
+        selection never rewrites model preprocessing or enables untrained touch.
+        """
+        tactile = getattr(self.policy.processor, "use_tactile", False)
+        if tactile and robot_type != "ffw_sh5_rev1":
+            raise ValueError("A tactile GR00T checkpoint requires robot_type=ffw_sh5_rev1")
+        if robot_type == "ffw_sh5_rev1":
+            widths = dict(zip(self.SH5_JOINT_KEYS, (7, 7, 20, 20)))
+            if self.policy_info["action"] != list(widths):
+                raise ValueError("SH5 checkpoint action order must be left_arm, right_arm, left_hand, right_hand")
+            state_widths = {**widths, **({"tactile_left": 45, "tactile_right": 45} if tactile else {})}
+            if self.policy_info["state"] != list(state_widths):
+                raise ValueError("SH5 checkpoint state keys do not match joints and optional tactile inputs")
+            profile = "sh5_tactile" if tactile else "sh5"
+        elif robot_type == "ffw_sg2_rev1":
+            widths = {"arm_left": 8, "arm_right": 8, "head": 2, "lift": 1,
+                      "odometry": 3, "mobile": 3}
+            state_widths = widths
+            profile = "sg2"
+        else:
+            return robot_type
+        params = self.policy.processor.state_action_processor.norm_params[self._embodiment_tag_value()]
+        for kind, expected in (("state", state_widths), ("action", widths)):
+            for key in self.policy_info[kind]:
+                if key not in expected:
+                    raise ValueError(f"Checkpoint {kind}.{key} is incompatible with selected robot {robot_type}")
+                actual = int(np.asarray(params[kind][key]["dim"]).item())
+                if actual != expected[key]:
+                    raise ValueError(f"{robot_type} {kind}.{key}: expected {expected[key]} values, got {actual}")
+        self.logger.info("Selected GR00T profile=%s from robot_type=%s", profile, robot_type)
+        return profile
 
     def get_action_chunk(self, request) -> dict:
         """Build observation from RobotClient, run inference, return action chunk."""
@@ -899,12 +935,37 @@ class GR00TInference:
             "action_dim": D,
         }
 
+    def reset_cycle(self) -> dict:
+        """Start a fresh episode after Cycle Home while retaining model/TRT weights."""
+        if not self.is_ready or not self._loaded_robot_type:
+            return self.fail("No loaded GR00T policy and robot to reset")
+        robot_type = self._loaded_robot_type
+        try:
+            self.robot.close()
+            self.robot = None
+            self.policy.reset()
+            # Discard pre-home camera/joint/tactile samples. SH5 consumes raw
+            # pressure, so this does not capture or subtract a tactile baseline.
+            self.init_robot_info(robot_type)
+            if not self.robot.wait_for_ready(timeout=10.0):
+                raise RuntimeError("Robot observations did not become ready after cycle reset")
+            return {
+                "success": True,
+                "message": "Fresh GR00T cycle; policy reset and observations reconnected",
+                "action_keys": self.command_action_keys(),
+            }
+        except Exception as exc:
+            self.logger.error("GR00T cycle reset failed: %s", exc, exc_info=True)
+            self.cleanup()
+            return self.fail(str(exc))
+
     def cleanup(self) -> None:
         """Release robot resources. Policy is kept cached for fast restart."""
         if self.robot is not None:
             self.robot.close()
             self.robot = None
 
+        self._loaded_robot_type = None
         self.policy_info = {k: [] for k in self.policy_info}
         self.robot_info = {
             "cameras": [],

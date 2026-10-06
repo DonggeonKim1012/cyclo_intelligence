@@ -8,14 +8,14 @@
 
 ## 소스와 체크포인트
 
-Cyclo의 GR00T submodule은 로컬 학습 저장소의
-`1852a8c13382b25cb656331b660600859925cfa0` 커밋을 선택한다.
+Cyclo의 GR00T submodule은 fork의
+`56a695669260908f116bf88a8c8843d07bd7bae6` 회사 호환 통합 커밋을 선택한다.
 기존 Dockerfile이 이 소스를 `/gr00t`에 복사하며 tactile encoder 파일의
 존재를 검사한다. 학습 저장소로 연결하는 symlink는 사용하지 않는다.
 
 submodule URL은 `https://github.com/DonggeonKim1012/Isaac-GR00T.git`이다.
-fork의 `main` 커밋 `b559d1e`에 pin된 tactile 커밋 `1852a8c`가 포함됨을
-확인했다. 다른 머신에서 재현하려면 `.gitmodules`, submodule gitlink,
+fork의 `integrate/sh5-tactile` 브랜치가 `56a6956`임을 확인했다.
+다른 머신에서 재현하려면 `.gitmodules`, submodule gitlink,
 Cyclo runtime 변경을 함께 커밋해야 한다. 이미지 배포는 수행하지 않았다.
 
 Task000650의 `checkpoint-200000` 전체를 사용한다. 모델 가중치/config,
@@ -28,7 +28,7 @@ manifest를 검증한 후 승격한다.
 
 체크포인트의 `use_tactile`을 읽어 `Gr00tPolicy`에 전달한다.
 저장된 processor가 256×256 이미지 전처리와 tactile 정규화를 복원한다.
-로봇 종류는 `ffw_sh5_rev1`, 가속 모드는 `pytorch`를 선택한다.
+로봇 종류는 `ffw_sh5_rev1`, 가속 모드는 `pytorch` 또는 `tensorrt_dit`를 선택한다.
 
 | Policy 키 | Cyclo 그룹/센서 | 차원 |
 | --- | --- | --- |
@@ -63,7 +63,7 @@ JetPack 환경을 사용한다.
 
 ```bash
 export ARCH=arm64
-export CYCLO_GROOT_IMAGE=local/groot-sh5:1852a8c-arm64
+export CYCLO_GROOT_IMAGE=local/groot:sh5-tactile-56a6956-arm64
 docker compose -f docker/docker-compose.yml build groot
 ```
 
@@ -75,6 +75,9 @@ docker compose -f docker/docker-compose.yml build groot
 변수가 없으면 기존 ROBOTIS 이미지가 기본값이며 tactile 모델에는 새
 이미지를 명시적으로 선택해야 한다.
 
+Cycle Home UI 변경을 반영하려면 main `cyclo_intelligence` 이미지도
+다시 빌드한다. `groot` 이미지만 빌드하면 frontend는 갱신되지 않는다.
+
 로봇 구독/구동 없이 컨테이너 추론을 검사하는 명령은 다음과 같다.
 
 ```bash
@@ -82,6 +85,7 @@ docker compose -f docker/docker-compose.yml run --rm --no-deps \
   --entrypoint /gr00t/.venv/bin/python groot \
   /app/scripts/smoke_groot_n17.py \
   --model-path /workspace/model/groot/task000650/checkpoint-200000 \
+  --robot-type ffw_sh5_rev1 \
   --synthetic-inference
 ```
 
@@ -91,10 +95,29 @@ ARM64는 위 venv 경로, AMD64는 `python`을 사용한다. 예상 출력은
 
 ## 검증 및 미확인 사항
 
+최신 변경: 동일 이미지에서 Cyclo가 선택한 robot_type으로 SG2/SH5를 검증한다.
+SG2 기본 계약은 22차원, SH5는 관절 54차원과 선택적인 촉각 90차원이다.
+체크포인트와 로봇의 키/차원이 다르면 센서 구독 전에 거부한다.
+기존 smoke 스크립트의 --robot-type으로 비구동 검증도 가능하다.
+
+TensorRT는 DiT 액션 네트워크만 대상 GPU용으로 컴파일한다. VLM과 촉각
+인코더는 PyTorch에 남는다. UI에서 TensorRT DiT를 선택하고 엔진을 빌드한
+후 Start한다. 빌더도 체크포인트의 tactile 설정을 복원한다.
+full-pipeline TensorRT는 지원하지 않는다.
+Cycle Home은 실제 SH5 GR00T 실행/일시정지 상태에서 활성화한다.
+PAUSE 확인 → 기존 SH5 both_sticks_up 복귀 요청 → 일치하는 완료 응답 확인
+→ 새로운 Start 흐름을 재사용한다. 복귀 자세는 로봇 bringup에서 정한다.
+Start 시 engine reset이 모델/TRT 가중치를 유지하며 policy를 초기화하고
+관측 구독을 재연결한다. 재연결 실패 시 추론을 차단한다.
+raw tactile 압력의 영점 또는 baseline은 변경하지 않는다.
+SG2/시뮬레이션에는 이 SH5 전용 복귀 기능을 활성화하지 않는다.
+GPU 의존성을 mock한 engine/camera 테스트 17개, 공통 reset 경로 테스트
+5개와 실제 UI 활성화 조건 검사 10개가 통과했다. 아래 횟수는 이전 통합 기록이다.
+
 sync 브랜치 이식 후 CPU에서 runtime/pressure/action 계약 및 camera 60개,
 기존 initial-pose 11개, supervisor 138개로 총 209개 테스트를 통과했다.
 원래 통합에서 pin된 GR00T tactile/processor 40개도 통과했으며,
-이번 이식에서 해당 submodule 커밋은 동일하다.
+이 횟수는 이전 submodule pin에서의 검증 기록이다.
 기존 ROS mock이 충돌하므로 initial-pose 테스트는 별도 프로세스로 실행했다.
 이전 검증에서 실제 checkpoint의 tactile 가중치를 strict 로딩하고 유한한 `(1,1,32)`
 latent 및 저장된 tactile/256×256 설정 복원을 확인했다. 이 processor
@@ -102,7 +125,9 @@ latent 및 저장된 tactile/256×256 설정 복원을 확인했다. 이 process
 
 이 서버에는 Docker가 없어 이미지 빌드, 컨테이너 전체 모델 추론,
 실제 메시지 정의, 대상 장치 지연 시간 및 로봇 검증은 미완료다.
-tactile checkpoint의 TensorRT는 별도 검증 전까지 거부한다.
+소스에서 tactile DiT TensorRT를 활성화했으나 대상 GPU의 수치 일치와 성능은
+아직 검증하지 않았다. ROS 테스트는 생성된 interface 메시지, React 테스트는
+frontend 의존성 설치가 필요하다.
 registry 이름은 아직 정하지 않았다.
 
 구현 근거: [runtime](../../cyclo_brain/policy/groot/runtime/inference_engine.py),
