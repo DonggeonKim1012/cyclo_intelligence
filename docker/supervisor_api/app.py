@@ -365,7 +365,7 @@ _BACKENDS: Dict[str, Dict[str, str]] = {
     "groot": {
         "service": "groot",
         "container": "groot_server",
-        "image": f"robotis/groot-zenoh:1.3.5-{_BACKEND_ARCH}",
+        "image": os.environ.get("CYCLO_GROOT_IMAGE") or f"robotis/groot-zenoh:1.3.5-{_BACKEND_ARCH}",
         "services": ["main-runtime", "engine-process"],
     },
     "vitacformer": {

@@ -86,6 +86,19 @@ _LEROBOT_REQUIRED_MOUNTS = app._REQUIRED_BACKEND_MOUNTS["lerobot"]
 _VITACFORMER_REQUIRED_MOUNTS = app._REQUIRED_BACKEND_MOUNTS["vitacformer"]
 
 
+def test_custom_groot_image_reaches_supervisor_and_compose(monkeypatch):
+    image = "local/groot-sh5:1852a8c-arm64"
+    monkeypatch.setenv("CYCLO_GROOT_IMAGE", image)
+    spec = importlib.util.spec_from_file_location("supervisor_sh5_image_test", APP_PATH)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "_host_workspace_dir", lambda: None)
+    monkeypatch.setattr(module, "_host_huggingface_dir", lambda: None)
+    assert module._BACKENDS["groot"]["image"] == image
+    assert module._compose_env()["CYCLO_GROOT_IMAGE"] == image
+
+
 def test_navigation_grid_cache_starts_with_supervisor_lifespan(monkeypatch):
     started = []
     monkeypatch.setattr(

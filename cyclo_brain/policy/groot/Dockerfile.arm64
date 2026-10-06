@@ -88,6 +88,7 @@ WORKDIR /gr00t
 
 # Copy the pinned N1.7 Isaac-GR00T checkout from the submodule.
 COPY Isaac-GR00T/ ./
+RUN test -f gr00t/model/modules/tactile_encoders.py
 
 # Use the official Orin-specific N1.7 dependency manifest instead of manually
 # listing torch / triton / flash-attn versions in this Dockerfile.
