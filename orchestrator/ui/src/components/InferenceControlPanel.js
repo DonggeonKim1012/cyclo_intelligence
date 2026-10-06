@@ -88,6 +88,7 @@ export default function InferenceControlPanel() {
   const dispatch = useDispatch();
   const taskInfo = useSelector(selectInferenceTaskInfo, shallowEqual);
   const inferenceStatus = useSelector((state) => state.tasks.inferenceStatus);
+  const robotType = useSelector((state) => state.tasks.robotType);
   const isSwitchingModel = useSelector((state) => Boolean(state.tasks.inferenceModelSwitch?.busy));
   const isPreloadingModel = useSelector((state) => Boolean(state.tasks.inferenceModelSwitch?.preloadBusy));
   const switchNeedsClear = useSelector((state) => Boolean(state.tasks.inferenceModelSwitch?.needsClear));
@@ -438,7 +439,8 @@ export default function InferenceControlPanel() {
     taskInfo.inferenceMode === 'robot' &&
     (
       (taskInfo.serviceType === 'lerobot' && taskInfo.policyType === 'tactile_act') ||
-      (taskInfo.serviceType === 'vitacformer' && taskInfo.policyType === 'vitacformer')
+      (taskInfo.serviceType === 'vitacformer' && taskInfo.policyType === 'vitacformer') ||
+      (taskInfo.serviceType === 'groot' && robotType === 'ffw_sh5_rev1')
     )
   );
   const clearEnabled = !isSwitchingModel && !isPreloadingModel && isModelLoaded;

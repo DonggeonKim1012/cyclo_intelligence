@@ -8,16 +8,16 @@ Implementation record, 2026-10-06 KST. Branch:
 
 ## Source and checkpoint
 
-Cyclo's GR00T submodule now selects the local training repository's commit
-`1852a8c13382b25cb656331b660600859925cfa0`. The Dockerfiles copy this submodule
+Cyclo's GR00T submodule now selects the company-compatible integration commit
+`56a695669260908f116bf88a8c8843d07bd7bae6`. The Dockerfiles copy this submodule
 into `/gr00t` and check that `tactile_encoders.py` is present. There is no
 training-repository symlink or runtime source mount.
 
 The submodule URL is `https://github.com/DonggeonKim1012/Isaac-GR00T.git`.
-Verified that the fork's `main` at `b559d1e` contains the pinned tactile commit
-`1852a8c`. Commit `.gitmodules` and the Cyclo gitlink together with the runtime
-changes so other machines can reproduce the build. No image publication has
-been performed.
+The configured branch is `integrate/sh5-tactile`, verified at `56a6956`.
+Normal submodule initialization uses this pinned commit; `update --remote`
+follows the configured branch. Commit `.gitmodules` and the Cyclo gitlink
+together. No image publication has been performed.
 
 Use the complete Task000650 `checkpoint-200000` package, including weights,
 model config, processor config, normalization statistics, and embodiment mapping.
@@ -29,7 +29,7 @@ complete package in a new staging directory before promotion.
 
 The runtime reads `use_tactile` from the checkpoint and passes it to `Gr00tPolicy`.
 The saved processor supplies the 256×256 image recipe and tactile normalization.
-Use robot type `ffw_sh5_rev1` and acceleration mode `pytorch`.
+Use robot type `ffw_sh5_rev1` and acceleration mode `pytorch` or `tensorrt_dit`.
 
 | Policy key | Cyclo group or sensor | Width |
 | --- | --- | --- |
@@ -65,7 +65,7 @@ For an Orin use ARM64 and the matching JetPack environment:
 
 ```bash
 export ARCH=arm64
-export CYCLO_GROOT_IMAGE=local/groot-sh5:1852a8c-arm64
+export CYCLO_GROOT_IMAGE=local/groot:sh5-tactile-56a6956-arm64
 docker compose -f docker/docker-compose.yml build groot
 ```
 
@@ -77,6 +77,9 @@ Recreate the main Cyclo container to apply this environment change when no
 robot job is running. The existing default ROBOTIS image remains the default
 when the variable is unset; it is not the image to select for this tactile model.
 
+Rebuild the main `cyclo_intelligence` image as well to include the updated
+Cycle Home UI; rebuilding only `groot` does not update the frontend bundle.
+
 After building, a non-actuating prediction can be run without the UI or robot
 subscriptions (replace the model directory as appropriate):
 
@@ -85,6 +88,7 @@ docker compose -f docker/docker-compose.yml run --rm --no-deps \
   --entrypoint /gr00t/.venv/bin/python groot \
   /app/scripts/smoke_groot_n17.py \
   --model-path /workspace/model/groot/task000650/checkpoint-200000 \
+  --robot-type ffw_sh5_rev1 \
   --synthetic-inference
 ```
 
@@ -95,10 +99,45 @@ the image/checkpoint does not authorize a real robot rollout.
 
 ## Verified and outstanding
 
+Latest update: the same GR00T image selects SG2 or SH5 from Cyclo's selected
+`robot_type`. LOAD validates saved state/action keys and widths before robot
+subscriptions: SG2's full example has 22 values; SH5 has 54 joint values and
+optionally 90 raw tactile values encoded into 32 features. It never rewrites
+checkpoint settings to force a different robot. The smoke script accepts
+`--robot-type ffw_sg2_rev1` or `--robot-type ffw_sh5_rev1` for an offline check.
+
+TensorRT compiles the DiT action network for the target GPU. VLM and tactile
+encoding remain in PyTorch. Select TensorRT DiT and build the engine before
+Start; the builder restores the tactile flag from the checkpoint. The command
+inside the running ARM64 container is:
+
+```bash
+docker compose -f docker/docker-compose.yml exec groot \
+  /gr00t/.venv/bin/python /app/runtime/prepare_trt_engine.py \
+  --model-path /workspace/model/groot/task000650/checkpoint-200000 \
+  --robot-type ffw_sh5_rev1
+```
+
+Build and validate the engine on the target GPU/software stack. Full-pipeline
+TensorRT remains unsupported. Cycle Home is enabled for real SH5 GR00T sessions
+in running or paused state. It acknowledges PAUSE, requests the existing SH5
+`both_sticks_up` return, waits for matching completion, then permits a fresh Start.
+Start dispatches the engine reset: model and TensorRT weights stay loaded,
+the policy resets, and robot observations reconnect. Failed reconnection blocks
+inference. Raw tactile pressure is not re-zeroed or baseline-subtracted.
+The return pose belongs to robot bringup; it is not inferred from the model.
+SG2 and simulation remain excluded from this SH5-specific home operation.
+
+Latest focused validation: 17 engine/camera tests passed with mocked GPU
+dependencies, including SG2/SH5 validation, tactile DiT engine preparation,
+and successful/failed cycle resets. Five shared reset protocol/service tests
+and 10 checks of the actual UI enablement expression also passed.
+Historical counts below refer to the previous integration.
+
 Verified after porting to the sync branch: 60 runtime/pressure/action-contract
 and camera tests, 11 isolated legacy initial-pose tests, and 138 supervisor
-tests (209 total). The original integration also passed 40 pinned GR00T
-tactile/processor tests; that submodule commit is unchanged. Legacy robot tests
+tests (209 total). The original integration also passed 40 GR00T
+tactile/processor tests on the earlier submodule pin. Legacy robot tests
 run separately because their ROS stubs conflict in one pytest process.
 Actual checkpoint tactile weights previously loaded strictly and
 produced finite `(1, 1, 32)` latent output; saved tactile/256×256 processor
@@ -106,8 +145,10 @@ settings restored. The VLM builder was mocked for this processor check.
 
 Docker is absent on this server. Image build, full model prediction in the
 container, live message definitions, target latency, and robot validation remain
-unverified. TensorRT is rejected for tactile checkpoints until separately
-validated. The image registry namespace remains a user choice.
+unverified. DiT TensorRT is enabled in source for tactile checkpoints, but
+target numerical agreement and performance remain unverified. The image registry
+namespace remains a user choice. ROS lifecycle tests need generated interface
+messages; the React suite needs the frontend dependencies installed.
 
 Primary implementation references: [runtime](../cyclo_brain/policy/groot/runtime/inference_engine.py),
 [RobotClient](../cyclo_brain/sdk/robot_client/robot_client/robot_client.py),

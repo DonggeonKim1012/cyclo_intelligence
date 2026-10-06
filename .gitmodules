@@ -7,3 +7,4 @@
 [submodule "cyclo_brain/policy/groot/Isaac-GR00T"]
 	path = cyclo_brain/policy/groot/Isaac-GR00T
 	url = https://github.com/DonggeonKim1012/Isaac-GR00T.git
+	branch = integrate/sh5-tactile
