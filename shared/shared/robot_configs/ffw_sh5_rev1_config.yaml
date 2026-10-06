@@ -6,6 +6,12 @@ orchestrator:
       joystick:
         trigger_topic: /leader/joystick_controller/tact_trigger
 
+      # Exact additional policy layout; recording retains head/lift/mobile.
+      # Task000650 controls 7 + 7 + 20 + 20 joints, in this order.
+      inference:
+        action_layouts:
+          groot_task000650: [arm_left, arm_right, hand_left, hand_right]
+
       # part of the default SH5 recording layout.
       observation:
         images:

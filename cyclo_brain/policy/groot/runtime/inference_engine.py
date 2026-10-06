@@ -28,12 +28,14 @@ Original Step 1 location: cyclo_brain/policy/groot/inference.py.
 Moved to runtime/ as part of D10-groot (mirrors lerobot/runtime/ layout).
 """
 import logging
+import json
 import os
 import sys
 import tempfile
 import time
 import ast
 from typing import Optional
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -226,6 +228,14 @@ class GR00TInference:
 
     logger = logging.getLogger("groot_inference")
     DEFAULT_EMBODIMENT_TAG = "new_embodiment"
+    SH5_JOINT_KEYS = {
+        "left_arm": "arm_left", "right_arm": "arm_right",
+        "left_hand": "hand_left", "right_hand": "hand_right",
+    }
+    SH5_TACTILE_KEYS = {
+        "tactile_left": "tactile_left_hand_pressure",
+        "tactile_right": "tactile_right_hand_pressure",
+    }
     ROTATE_MAP = {
         90: cv2.ROTATE_90_CLOCKWISE,
         180: cv2.ROTATE_180,
@@ -292,11 +302,12 @@ class GR00TInference:
                     self.robot = None
                 self.init_policy_info()
                 self.init_robot_info(robot_type)
-                self.robot.wait_for_ready(timeout=10.0)
+                if not self.robot.wait_for_ready(timeout=10.0):
+                    raise RuntimeError("Robot observations did not become ready")
                 return {
                     "success": True,
                     "message": "GR00T inference restarted (policy cached)",
-                    "action_keys": list(self.policy_info["action"]),
+                    "action_keys": self.command_action_keys(),
                 }
 
             if self.policy is not None:
@@ -321,15 +332,20 @@ class GR00TInference:
             )
             self._sync_hf_token_for_gated_backbones()
 
+            policy_kwargs = self.checkpoint_policy_kwargs(model_path)
+            if policy_kwargs and acceleration_mode != ACCELERATION_PYTORCH:
+                raise RuntimeError("SH5 tactile checkpoints currently require PyTorch acceleration mode")
             self.policy = Gr00tPolicy(
                 embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
                 model_path=model_path,
                 device="cuda",
+                **policy_kwargs,
             )
 
             self.init_policy_info()
             self.init_robot_info(robot_type)
-            self.robot.wait_for_ready(timeout=10.0)
+            if not self.robot.wait_for_ready(timeout=10.0):
+                raise RuntimeError("Robot observations did not become ready")
 
             if acceleration_mode == ACCELERATION_TENSORRT_DIT:
                 trt_applied = self._enable_dit_tensorrt(
@@ -352,7 +368,7 @@ class GR00TInference:
             return {
                 "success": True,
                 "message": "GR00T inference started",
-                "action_keys": list(self.policy_info["action"]),
+                "action_keys": self.command_action_keys(),
             }
         except Exception as e:
             self._loaded_model_path = None
@@ -361,6 +377,23 @@ class GR00TInference:
             message = self._format_load_error(e)
             self.logger.error("Failed to start inference: %s", message, exc_info=True)
             return self.fail(message)
+
+    @staticmethod
+    def checkpoint_policy_kwargs(model_path: str) -> dict:
+        """Opt in only for tactile checkpoints; legacy policy calls stay compatible."""
+        config_path = Path(model_path) / "config.json"
+        if not config_path.is_file():
+            raise FileNotFoundError(f"Checkpoint config is missing: {config_path}")
+        config = json.loads(config_path.read_text())
+        use_tactile = config.get("use_tactile", False)
+        if not isinstance(use_tactile, bool):
+            raise ValueError("Checkpoint use_tactile must be a boolean")
+        return {"use_tactile": True} if use_tactile else {}
+
+    def command_action_keys(self) -> list[str]:
+        """Keep checkpoint chunk order, translating only the controller group names."""
+        mapping = self.robot_info.get("action_keys", {})
+        return [mapping.get(key, key) for key in self.policy_info["action"]]
 
     @staticmethod
     def _normalize_acceleration_mode(value: str) -> str:
@@ -676,7 +709,20 @@ class GR00TInference:
 
     def init_robot_info(self, robot_type: str) -> None:
         """Create RobotClient and resolve active cameras/joints from YAML."""
-        self.robot = RobotClient(robot_type)
+        use_tactile = getattr(self.policy.processor, "use_tactile", False)
+        is_sh5 = robot_type == "ffw_sh5_rev1"
+        if use_tactile and not is_sh5:
+            raise ValueError("This tactile runtime requires robot_type=ffw_sh5_rev1")
+        robot_kwargs = {}
+        if is_sh5:
+            robot_kwargs["requested_camera_names"] = self.policy_info["video"]
+        if use_tactile:
+            if list(self.policy.processor.tactile_state_keys) != list(self.SH5_TACTILE_KEYS):
+                raise ValueError("SH5 tactile state keys must be tactile_left, tactile_right")
+            if tuple(self.policy.processor.tactile_input_shape) != (2, 5, 9):
+                raise ValueError("SH5 tactile shape must be (2, 5, 9)")
+            robot_kwargs.update(enable_tactile=True, strict_sh5_tactile=True)
+        self.robot = RobotClient(robot_type, **robot_kwargs)
         cam_config = self.robot._config.get("cameras", {})
         available_cameras = set(self.robot.camera_names)
 
@@ -701,6 +747,24 @@ class GR00TInference:
             if modality_key in self.policy_info["state"]:
                 joints[modality_key] = group
         self.robot_info["joints"] = joints
+        self.robot_info["action_keys"] = {}
+        if is_sh5:
+            joint_cfg = self.robot._config["joint_groups"]
+            action_cfg = self.robot._action_groups
+            prefixes = {"left_arm": ("arm_l_joint", 7), "right_arm": ("arm_r_joint", 7),
+                        "left_hand": ("finger_l_joint", 20), "right_hand": ("finger_r_joint", 20)}
+            for policy_key, robot_key in self.SH5_JOINT_KEYS.items():
+                group = f"follower_{robot_key}"
+                prefix, width = prefixes[policy_key]
+                expected = [f"{prefix}{i}" for i in range(1, width + 1)]
+                if policy_key in self.policy_info["state"]:
+                    if joint_cfg.get(group, {}).get("joint_names") != expected:
+                        raise ValueError(f"SH5 state joint order mismatch: {policy_key}")
+                    joints[policy_key] = group
+                if policy_key in self.policy_info["action"]:
+                    if action_cfg.get(robot_key, {}).get("joint_names") != expected:
+                        raise ValueError(f"SH5 action joint order mismatch: {policy_key}")
+                    self.robot_info["action_keys"][policy_key] = robot_key
 
         # Sensor-backed state modalities. Training runs have used both
         # ``mobile`` and ``odometry`` for the same 3-dim base velocity slice,
@@ -713,6 +777,14 @@ class GR00TInference:
                 if modality_key in self.policy_info["state"]:
                     sensor_states[modality_key] = "odom"
         self.robot_info["sensor_states"] = sensor_states
+        tactile_states = dict(self.SH5_TACTILE_KEYS) if use_tactile else {}
+        for sensor in tactile_states.values():
+            if sensor not in sensors_cfg:
+                raise ValueError(f"Missing configured SH5 tactile sensor: {sensor}")
+        self.robot_info["tactile_states"] = tactile_states
+        missing = set(self.policy_info["state"]) - set(joints) - set(sensor_states) - set(tactile_states)
+        if missing:
+            raise ValueError(f"Unmapped policy states: {sorted(missing)}")
 
         self.logger.info("Robot info: %s", self.robot_info)
 
@@ -778,6 +850,19 @@ class GR00TInference:
             else:
                 return self.fail(f"Unsupported sensor modality: {sensor_name}")
 
+        for key, sensor_name in self.robot_info.get("tactile_states", {}).items():
+            sample = self.robot.get_sensor(sensor_name)
+            if not sample:
+                return self.fail(f"Missing tactile sensor: {sensor_name}")
+            age = time.monotonic() - sample.get("received_monotonic", float("-inf"))
+            if not np.isfinite(age) or age < 0 or age > 0.2:
+                return self.fail(f"Stale tactile sensor: {sensor_name}")
+            values = np.asarray(sample.get("taxels"), dtype=np.float32)
+            if values.shape != (5, 3, 3) or not np.isfinite(values).all():
+                return self.fail(f"Invalid tactile values: {sensor_name}")
+            # Raw 45 values per hand. The checkpoint processor applies normalization.
+            state_obs[key] = values.reshape(1, 1, 45)
+
         language_obs = {key: [[task]] for key in self.policy_info["language"]}
 
         return {
@@ -787,6 +872,9 @@ class GR00TInference:
         }
 
     def postprocess_action(self, action: dict) -> dict:
+        missing = [key for key in self.policy_info["action"] if key not in action]
+        if missing:
+            return self.fail(f"Missing action outputs: {missing}")
         chunks = [
             action[key][0]  # remove batch dim
             for key in self.policy_info["action"]
@@ -796,6 +884,8 @@ class GR00TInference:
             return self.fail("No action output from policy")
 
         chunk = np.concatenate(chunks, axis=1)  # (T, D_total)
+        if not np.isfinite(chunk).all():
+            return self.fail("Non-finite action output")
         T, D = chunk.shape
         self.logger.info("Action chunk: T=%d, D=%d", T, D)
         return {
