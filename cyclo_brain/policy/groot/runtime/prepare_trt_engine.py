@@ -111,8 +111,10 @@ def main() -> int:
             embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
             model_path=args.model_path,
             device="cuda",
+            **inference.checkpoint_policy_kwargs(args.model_path),
         )
         inference.init_policy_info()
+        inference.validate_robot_profile(args.robot_type)
 
         LOGGER.info("Building model-schema synthetic observation")
         observation = inference.build_synthetic_observation(args.task_instruction)

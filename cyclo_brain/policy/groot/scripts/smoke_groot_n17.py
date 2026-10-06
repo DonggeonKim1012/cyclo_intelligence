@@ -30,7 +30,13 @@ def main() -> None:
         default="new_embodiment",
         help="Embodiment tag to use when --model-path is provided.",
     )
+    parser.add_argument(
+        "--robot-type", choices=("ffw_sg2_rev1", "ffw_sh5_rev1"),
+        help="Validate the checkpoint against the robot selected in Cyclo, without subscriptions.",
+    )
     args = parser.parse_args()
+    if args.robot_type and not args.model_path:
+        parser.error("--robot-type requires --model-path")
 
     print(f"GROOT_TRT_ENABLED={os.environ.get('GROOT_TRT_ENABLED')}")
     print(f"cwd={Path.cwd()}")
@@ -74,12 +80,14 @@ def main() -> None:
         )
         print(f"loaded_policy={type(policy).__name__}")
         print(f"modality_keys={list(policy.modality_configs.keys())}")
+        engine = GR00TInference()
+        engine.policy = policy
+        engine.init_policy_info()
+        if args.robot_type:
+            print(f"robot_profile={engine.validate_robot_profile(args.robot_type)}")
         if args.synthetic_inference:
             import numpy as np
 
-            engine = GR00TInference()
-            engine.policy = policy
-            engine.init_policy_info()
             observation = engine.build_synthetic_observation("Pick and hold two items")
             action, _ = policy.get_action(observation)
             chunk = engine.postprocess_action(action)
