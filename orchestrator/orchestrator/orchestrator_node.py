@@ -2338,7 +2338,7 @@ class OrchestratorNode(Node):
                                         response.message = (
                                             'Inference paused and task initial-pose '
                                             'return requested. Wait until motion stops, '
-                                            'reset the cups with hands clear, then press Start.'
+                                            'reset the scene with hands clear, then press Start.'
                                         )
                                     else:
                                         response.success = False
