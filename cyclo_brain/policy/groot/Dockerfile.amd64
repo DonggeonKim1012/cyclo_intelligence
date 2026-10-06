@@ -137,6 +137,7 @@ WORKDIR /gr00t
 # Copy GR00T source from submodule
 # Build context is cyclo_brain/policy/groot/, so paths are relative to that
 COPY Isaac-GR00T/ ./
+RUN test -f gr00t/model/modules/tactile_encoders.py
 
 # Patch pyproject.toml to allow Python 3.12 (base image uses 3.12)
 # GR00T officially requires 3.10 but code is compatible with 3.12

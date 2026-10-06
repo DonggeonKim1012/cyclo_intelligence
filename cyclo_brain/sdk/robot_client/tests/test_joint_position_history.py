@@ -44,6 +44,34 @@ RobotClient = robot_client_module.RobotClient
 
 
 class JointPositionHistoryTests(unittest.TestCase):
+    def test_sh5_pressure_parser_uses_names_and_rejects_bad_order(self):
+        sensors = [types.SimpleNamespace(
+            sensor_name=f"finger_l_sensor{i}",
+            pressure_names=[f"Present Pressure {j}" for j in range(1, 10)],
+            pressure_values=[10 * i + j for j in range(9)],
+        ) for i in range(1, 6)]
+        msg = types.SimpleNamespace(sensors=list(reversed(sensors)))
+        values = RobotClient._sh5_hand_pressure_taxels(msg, "left")
+        np.testing.assert_array_equal(values.reshape(5, 9)[:, 0], [10, 20, 30, 40, 50])
+        with self.assertRaises(ValueError):
+            RobotClient._sh5_hand_pressure_taxels(msg, "right")
+        sensors[0].pressure_names.reverse()
+        with self.assertRaises(ValueError):
+            RobotClient._sh5_hand_pressure_taxels(msg, "left")
+        sensors[0].pressure_names.reverse()
+        sensors[0].pressure_values[0] = float("nan")
+        with self.assertRaises(ValueError):
+            RobotClient._sh5_hand_pressure_taxels(msg, "left")
+
+    def test_invalid_sh5_callback_clears_cached_sample(self):
+        robot = self._robot([])
+        robot._strict_sh5_tactile = True
+        name = "tactile_left_hand_pressure"
+        robot._config["sensors"] = {name: {"kind": "tactile"}}
+        robot._sensors = {name: {"taxels": np.zeros((5, 3, 3))}}
+        robot._update_sensor(name, types.SimpleNamespace(sensors=[]))
+        self.assertNotIn(name, robot._sensors)
+
     def _robot(self, samples) -> RobotClient:
         robot = RobotClient.__new__(RobotClient)
         robot._lock = threading.Lock()

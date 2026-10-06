@@ -30,3 +30,6 @@ To access datasets and pre-trained models for our open-source platforms, see:
 
 To use Docker images for running Cyclo Intelligence, visit:
   - [Docker Images](https://hub.docker.com/u/robotis)
+
+For the SH5 tactile GR00T integration, see the
+[build and inference guide](docs/2026-10-06_09-44-52_sh5_tactile_groot_inference.md).
