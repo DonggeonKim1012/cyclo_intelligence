@@ -244,6 +244,7 @@ class RobotClient:
         enable_preview_publisher: bool = False,
         requested_camera_names: Optional[Iterable[str]] = None,
         enable_tactile: bool = False,
+        strict_sh5_tactile: bool = False,
     ):
         section = robot_schema.load_robot_section(robot_type)
         # Phase 4: yaml is VLA-semantic (observation.images / state +
@@ -256,6 +257,7 @@ class RobotClient:
             enable_tactile=enable_tactile,
         )
 
+        self._strict_sh5_tactile = strict_sh5_tactile
         self._robot_type = robot_type
         self._sync_check = sync_check
         self._sync_threshold_ms = sync_threshold_ms
@@ -309,6 +311,13 @@ class RobotClient:
         self._recorded_action_keys = [
             key for key in self._action_keys if key in self._recorded_action_groups
         ]
+        self._inference_action_layouts = (section.get("inference") or {}).get("action_layouts", {})
+        for name, keys in self._inference_action_layouts.items():
+            if (not isinstance(keys, list) or not keys
+                    or any(not isinstance(key, str) for key in keys)
+                    or len(set(keys)) != len(keys)
+                    or not set(keys).issubset(self._action_groups)):
+                raise ValueError(f"Invalid inference action layout: {name}")
         self._cmd_vel_linear_deadband = max(
             0.0,
             _float_env("CMD_VEL_LINEAR_DEADBAND", 0.0),
@@ -605,7 +614,16 @@ class RobotClient:
                     "angular": np.array([msg.angular.x, msg.angular.y, msg.angular.z], dtype=np.float32),
                 }
             elif sensor_cfg.get("kind") == "tactile":
-                taxels = self._hand_pressure_taxels(msg)
+                if getattr(self, "_strict_sh5_tactile", False):
+                    side = {
+                        "tactile_left_hand_pressure": "left",
+                        "tactile_right_hand_pressure": "right",
+                    }.get(sensor_name)
+                    if side is None:
+                        raise ValueError(f"Unknown SH5 tactile sensor: {sensor_name}")
+                    taxels = self._sh5_hand_pressure_taxels(msg, side)
+                else:
+                    taxels = self._hand_pressure_taxels(msg)
                 data = {
                     # ``values`` remains the backwards-compatible per-finger
                     # mean view used by flat observation.state policies.
@@ -613,6 +631,7 @@ class RobotClient:
                     # Custom tactile ACT consumes every 3x3 taxel.
                     "taxels": taxels,
                     "hand_name": str(getattr(msg, "hand_name", "") or ""),
+                    "received_monotonic": time.monotonic(),
                 }
             else:
                 data = {"raw": str(msg)}
@@ -636,7 +655,36 @@ class RobotClient:
                     if len(samples) < 64:
                         samples.append(data["taxels"].copy())
         except Exception as e:
+            if getattr(self, "_strict_sh5_tactile", False):
+                # Never reuse a cached frame after malformed tactile input.
+                with self._lock:
+                    self._sensors.pop(sensor_name, None)
             logger.warning(f"Failed to parse sensor {sensor_name}: {e}")
+
+    @staticmethod
+    def _sh5_hand_pressure_taxels(msg, side: str) -> np.ndarray:
+        """Task000650 ordering: named sensor 1..5, Present Pressure 1..9."""
+        sensors = list(getattr(msg, "sensors", []) or [])
+        names = [getattr(sensor, "sensor_name", "") for sensor in sensors]
+        expected = [f"finger_{side[0]}_sensor{i}" for i in range(1, 6)]
+        if len(names) != 5 or set(names) != set(expected):
+            raise ValueError(f"Expected SH5 sensors {expected}, got {names}")
+        by_name = dict(zip(names, sensors))
+        pressure_names = [f"Present Pressure {i}" for i in range(1, 10)]
+        rows = []
+        for name in expected:
+            sensor = by_name[name]
+            if list(getattr(sensor, "pressure_names", [])) != pressure_names:
+                raise ValueError(f"Unexpected pressure order for {name}")
+            raw = getattr(sensor, "pressure_values", None)
+            if isinstance(raw, (bytes, bytearray, memoryview)):
+                values = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
+            else:
+                values = np.asarray(raw, dtype=np.float32)
+            if values.shape != (9,) or not np.isfinite(values).all():
+                raise ValueError(f"Invalid SH5 pressure values for {name}")
+            rows.append(values)
+        return np.stack(rows).reshape(5, 3, 3)
 
     @staticmethod
     def _hand_pressure_taxels(msg) -> np.ndarray:
@@ -1217,6 +1265,11 @@ class RobotClient:
             )
 
         expected = list(self._recorded_action_keys)
+        # Robot YAML may authorize additional exact layouts, never arbitrary subsets.
+        for layout in getattr(self, "_inference_action_layouts", {}).values():
+            if keys == layout:
+                expected = list(layout)
+                break
         if keys != expected:
             raise ValueError(
                 "real action key contract mismatch: "
