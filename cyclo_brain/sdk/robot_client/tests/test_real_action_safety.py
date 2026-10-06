@@ -44,6 +44,23 @@ RobotClient = robot_client_module.RobotClient
 
 
 class RealActionSafetyTests(unittest.TestCase):
+    def test_sh5_exact_layout_allows_only_declared_order(self):
+        import yaml
+
+        section = yaml.safe_load((REPO_ROOT / "shared/shared/robot_configs/ffw_sh5_rev1_config.yaml").read_text())["orchestrator"]["ros__parameters"]["ffw_sh5_rev1"]
+        robot = self._robot()
+        robot._action_groups = section["action"]
+        robot._recorded_action_keys = sorted(section["action"])
+        robot._inference_action_layouts = section["inference"]["action_layouts"]
+        robot._command_publishers = {f"leader_{key}": object() for key in section["action"]}
+        keys = ["arm_left", "arm_right", "hand_left", "hand_right"]
+        robot.validate_real_action_contract(keys)
+        self.assertEqual(robot.action_dimension(keys), 54)
+        robot.validate_real_action_contract(robot._recorded_action_keys)
+        for wrong in (keys[::-1], keys[:-1], keys + ["head"], keys + [keys[0]]):
+            with self.assertRaises(ValueError):
+                robot.validate_real_action_contract(wrong)
+
     def _robot(self) -> RobotClient:
         robot = RobotClient.__new__(RobotClient)
         robot._closed = True
