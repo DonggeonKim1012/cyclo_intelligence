@@ -893,6 +893,8 @@ export default function MissionCanvasWorkspace({
   }, [designDocumentReady, workspaceStage]);
 
   const teleopDisabled = !!busy || mappingEditorActive;
+  const [mobileMotionActive, setMobileMotionActive] = useState(false);
+  const [upperBodyBusy, setUpperBodyBusy] = useState(false);
 
   const navigationRuntimeSession = useNavigationRuntimeSessionController({
     enabled: true,
@@ -2011,10 +2013,15 @@ export default function MissionCanvasWorkspace({
               selectedSpotId,
             },
             mapping: {
+              mobileMotionActive,
               onMessage: setMessage,
+              onMobileMotionActiveChange: setMobileMotionActive,
               onPublishTeleop: publishTeleopCommand,
+              onPublishRosTopic: publishRosTopic,
+              onUpperBodyBusyChange: setUpperBodyBusy,
               teleopDisabled,
               topicRows,
+              upperBodyBusy,
             },
             navigation: {
               goalStatus: navGoalStatus,

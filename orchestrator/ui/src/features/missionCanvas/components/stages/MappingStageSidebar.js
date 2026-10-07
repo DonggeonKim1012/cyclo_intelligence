@@ -17,10 +17,16 @@
 import { TopicStatusPanel } from "../mapChrome";
 import MappingSessionPanel from "../mapping/MappingSessionPanel";
 import MappingTeleopPanel from "../mapping/MappingTeleopPanel";
+import MappingUpperBodyJogPanel from "../mapping/MappingUpperBodyJogPanel";
 
 export default function MappingStageSidebar({
   teleopDisabled,
+  mobileMotionActive,
+  upperBodyBusy,
+  onMobileMotionActiveChange,
+  onUpperBodyBusyChange,
   onPublishTeleop,
+  onPublishRosTopic,
   onMessage,
   topicRows,
 }) {
@@ -28,7 +34,16 @@ export default function MappingStageSidebar({
     <>
       <MappingTeleopPanel
         disabled={teleopDisabled}
+        motionBlocked={upperBodyBusy}
+        onMotionActiveChange={onMobileMotionActiveChange}
         onPublish={onPublishTeleop}
+        onMessage={onMessage}
+      />
+      <MappingUpperBodyJogPanel
+        disabled={teleopDisabled}
+        mobileMotionActive={mobileMotionActive}
+        onBusyChange={onUpperBodyBusyChange}
+        onPublishRosTopic={onPublishRosTopic}
         onMessage={onMessage}
       />
       <MappingSessionPanel />
