@@ -29,23 +29,16 @@ import SegmentPanel from '../components/SegmentPanel';
 import RecordTopicMonitor from '../components/RecordTopicMonitor';
 import TactileHandsPanel from '../components/TactileHandsPanel';
 import HandPresetControl from '../components/HandPresetControl';
-import { selectInferenceTaskInfo } from '../features/tasks/taskSlice';
 import { setIsFirstLoadFalse } from '../features/ui/uiSlice';
 import { useRosServiceCaller } from '../hooks/useRosServiceCaller';
-import { usesTactileInput } from '../constants/policyCapabilities';
 
 export default function RecordPage({ isActive = true }) {
   const dispatch = useDispatch();
   const { sendRecordCommand } = useRosServiceCaller();
 
   const robotType = useSelector((state) => state.tasks.robotType);
-  const inferenceInfo = useSelector(selectInferenceTaskInfo);
   const joystickMode = useSelector((state) => state.tasks.joystickMode);
   const isSh5RobotConnected = String(robotType || '').toLowerCase().includes('sh5');
-  const tactileEnabled = isSh5RobotConnected && usesTactileInput(
-    inferenceInfo.serviceType,
-    inferenceInfo.policyType
-  );
 
   // Toast limit implementation using useToasterStore
   const { toasts } = useToasterStore();
@@ -202,7 +195,7 @@ export default function RecordPage({ isActive = true }) {
                 <RobotViewer3D mode="live" />
               </div>
             )}
-            <TactileHandsPanel enabled={isActive && tactileEnabled} />
+            <TactileHandsPanel enabled={isActive && isSh5RobotConnected} />
             <HandPresetControl enabled={isActive && isSh5RobotConnected} />
             <div className="h-[85%]" style={{ aspectRatio: '4/3' }}>
               <RecordTopicMonitor />
