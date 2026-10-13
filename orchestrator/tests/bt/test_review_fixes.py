@@ -116,7 +116,6 @@ def _real_ros_modules_available():
         return False
     return True
 
-
 if not _real_ros_modules_available():
     _install_ros_stubs()
 
@@ -125,7 +124,10 @@ from orchestrator.bt.actions.arm_state_gate import ArmStateGate  # noqa: E402
 from orchestrator.bt.actions.joint_control import (  # noqa: E402
     _coerce_positions,
 )
-from orchestrator.bt.actions.send_command import SendCommand  # noqa: E402
+from orchestrator.bt.actions.send_command import (  # noqa: E402
+    SendCommand,
+    _service_type_from_model,
+)
 from orchestrator.bt.bt_core import NodeStatus  # noqa: E402
 from orchestrator.bt.node_registry import (  # noqa: E402
     _annotation_to_port_type,
@@ -942,3 +944,27 @@ def test_load_send_command_sets_action_processing_timing():
     assert task_info.control_hz == 80
     assert task_info.inference_hz == 20
     assert task_info.chunk_align_window_s == 0.25
+
+
+def test_load_send_command_preserves_step_sync_mode():
+    context = types.SimpleNamespace(node=_DummyNode())
+
+    action = SendCommand.from_xml_params(
+        context,
+        'LoadInference',
+        {
+            'command': 'LOAD',
+            'action_request_mode': 'sync_step',
+        },
+    )
+    task_info = action._build_task_info()
+
+    assert action.action_request_mode == 'sync_step'
+    assert task_info.action_request_mode == 'sync_step'
+
+
+def test_vitacformer_models_route_to_dedicated_backend():
+    assert _service_type_from_model('vitacformer:vitacformer') == 'vitacformer'
+    assert _service_type_from_model('vitacformer') == 'vitacformer'
+    # Keep saved BTs created before the backend split working.
+    assert _service_type_from_model('lerobot:vitacformer') == 'vitacformer'

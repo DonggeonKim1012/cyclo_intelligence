@@ -20,6 +20,8 @@
   <depend>rosbag2_py</depend>
   <depend>rosbag_recorder</depend>
   <depend>shared</depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
   <export>
     <build_type>ament_python</build_type>
   </export>

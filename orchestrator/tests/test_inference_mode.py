@@ -21,6 +21,9 @@ spec.loader.exec_module(inference_mode)
 inference_runtime_signature = inference_mode.inference_runtime_signature
 inference_timing_from_task_info = inference_mode.inference_timing_from_task_info
 publish_to_robot_from_task_info = inference_mode.publish_to_robot_from_task_info
+publish_to_robot_override_from_task_info = (
+    inference_mode.publish_to_robot_override_from_task_info
+)
 
 
 class InferenceModeTests(unittest.TestCase):
@@ -129,6 +132,91 @@ class InferenceModeTests(unittest.TestCase):
                 True, 7.5,
             ),
         )
+    def test_resume_override_accepts_explicit_robot_and_simulation(self) -> None:
+        self.assertTrue(
+            publish_to_robot_override_from_task_info(
+                SimpleNamespace(inference_mode="robot")
+            )
+        )
+        self.assertFalse(
+            publish_to_robot_override_from_task_info(
+                SimpleNamespace(inference_mode="simulation")
+            )
+        )
+
+    def test_start_defaults_completely_absent_mode_to_simulation(self) -> None:
+        override = publish_to_robot_override_from_task_info(SimpleNamespace())
+
+        self.assertIsNone(override)
+        self.assertFalse(bool(override))
+
+    def test_start_accepts_current_ui_matching_field_and_tag(self) -> None:
+        self.assertTrue(
+            publish_to_robot_override_from_task_info(
+                SimpleNamespace(
+                    inference_mode="robot",
+                    tags=["inference_mode:robot"],
+                )
+            )
+        )
+        self.assertFalse(
+            publish_to_robot_override_from_task_info(
+                SimpleNamespace(
+                    inference_mode="simulation",
+                    tags=["inference_mode:simulation"],
+                )
+            )
+        )
+
+    def test_resume_override_preserves_loaded_mode_for_legacy_payload(self) -> None:
+        self.assertIsNone(
+            publish_to_robot_override_from_task_info(SimpleNamespace())
+        )
+        self.assertIsNone(
+            publish_to_robot_override_from_task_info(
+                SimpleNamespace(inference_mode="")
+            )
+        )
+
+    def test_resume_override_accepts_backward_compatible_tags(self) -> None:
+        self.assertTrue(
+            publish_to_robot_override_from_task_info(
+                SimpleNamespace(
+                    inference_mode="",
+                    tags=["inference_mode:robot"],
+                )
+            )
+        )
+        self.assertFalse(
+            publish_to_robot_override_from_task_info(
+                SimpleNamespace(
+                    inference_mode="",
+                    tags=["publish_to_robot:false"],
+                )
+            )
+        )
+
+    def test_resume_override_rejects_invalid_explicit_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Invalid inference_mode"):
+            publish_to_robot_override_from_task_info(
+                SimpleNamespace(inference_mode="simulaton")
+            )
+        with self.assertRaisesRegex(ValueError, "Invalid inference mode tag"):
+            publish_to_robot_override_from_task_info(
+                SimpleNamespace(
+                    inference_mode="",
+                    tags=["inference_mode:simulaton"],
+                )
+            )
+
+    def test_resume_override_rejects_conflicting_field_and_tag(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Conflicting inference modes"):
+            publish_to_robot_override_from_task_info(
+                SimpleNamespace(
+                    inference_mode="robot",
+                    tags=["inference_mode:simulation"],
+                )
+            )
 
 
 if __name__ == "__main__":

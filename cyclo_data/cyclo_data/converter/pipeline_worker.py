@@ -471,6 +471,16 @@ class Mp4ConversionWorker:
                             data.get('selected_action_topics', []) or []
                         )
                         selected_joints = list(data.get('selected_joints', []) or [])
+                        tactile_mode = str(
+                            data.get('tactile_mode', 'state_mean')
+                            or 'state_mean'
+                        )
+                        selected_tactile_topics = list(
+                            data.get('selected_tactile_topics', []) or []
+                        )
+                        tactile_baseline_samples = int(
+                            data.get('tactile_baseline_samples', 20) or 20
+                        )
 
                         logger.info(f'Processing chained conversion for: {dataset_path}')
                         if selected_cameras or camera_rotations or image_resize:
@@ -560,6 +570,9 @@ class Mp4ConversionWorker:
                                 selected_state_topics=selected_state_topics,
                                 selected_action_topics=selected_action_topics,
                                 selected_joints=selected_joints,
+                                tactile_mode=tactile_mode,
+                                selected_tactile_topics=selected_tactile_topics,
+                                tactile_baseline_samples=tactile_baseline_samples,
                                 source_rosbags=source_folders or [Path(dataset_path).name],
                             )
                             if not success:
@@ -589,6 +602,9 @@ class Mp4ConversionWorker:
                                 selected_state_topics=selected_state_topics,
                                 selected_action_topics=selected_action_topics,
                                 selected_joints=selected_joints,
+                                tactile_mode=tactile_mode,
+                                selected_tactile_topics=selected_tactile_topics,
+                                tactile_baseline_samples=tactile_baseline_samples,
                                 source_rosbags=source_folders or [Path(dataset_path).name],
                             )
                             if not success:
@@ -620,6 +636,9 @@ class Mp4ConversionWorker:
                                 selected_state_topics=selected_state_topics,
                                 selected_action_topics=selected_action_topics,
                                 selected_joints=selected_joints,
+                                tactile_mode=tactile_mode,
+                                selected_tactile_topics=selected_tactile_topics,
+                                tactile_baseline_samples=tactile_baseline_samples,
                                 source_rosbags=source_folders or [Path(dataset_path).name],
                             )
                             if not success:
@@ -1178,6 +1197,9 @@ class Mp4ConversionWorker:
             'selected_state_topics': list(config.selected_state_topics),
             'selected_action_topics': list(config.selected_action_topics),
             'selected_joints': list(config.selected_joints),
+            'tactile_mode': config.tactile_mode,
+            'selected_tactile_topics': list(config.selected_tactile_topics),
+            'tactile_baseline_samples': int(config.tactile_baseline_samples),
             'source_rosbags': list(config.source_rosbags),
         }
 
@@ -1230,6 +1252,9 @@ class Mp4ConversionWorker:
         selected_state_topics: Optional[List[str]] = None,
         selected_action_topics: Optional[List[str]] = None,
         selected_joints: Optional[List[str]] = None,
+        tactile_mode: str = 'state_mean',
+        selected_tactile_topics: Optional[List[str]] = None,
+        tactile_baseline_samples: int = 20,
         source_rosbags: Optional[List[str]] = None,
     ) -> tuple:
         """Shared parse path for v2.1 + v3.0 conversion."""
@@ -1276,6 +1301,9 @@ class Mp4ConversionWorker:
                 selected_state_topics=list(selected_state_topics or []),
                 selected_action_topics=list(selected_action_topics or []),
                 selected_joints=list(selected_joints or []),
+                tactile_mode=tactile_mode,
+                selected_tactile_topics=list(selected_tactile_topics or []),
+                tactile_baseline_samples=int(tactile_baseline_samples),
                 source_rosbags=list(source_rosbags or [dataset_path.name]),
             )
             episodes_data, parser = Mp4ConversionWorker._parse_converted_episodes(
@@ -1319,6 +1347,9 @@ class Mp4ConversionWorker:
                 selected_state_topics=list(selected_state_topics or []),
                 selected_action_topics=list(selected_action_topics or []),
                 selected_joints=list(selected_joints or []),
+                tactile_mode=tactile_mode,
+                selected_tactile_topics=list(selected_tactile_topics or []),
+                tactile_baseline_samples=int(tactile_baseline_samples),
                 source_rosbags=list(source_rosbags or [dataset_path.name]),
             )
             v30_converter = RosbagToLerobotV30Converter(v30_config, logger)
@@ -1362,6 +1393,9 @@ class Mp4ConversionWorker:
         selected_state_topics: Optional[List[str]] = None,
         selected_action_topics: Optional[List[str]] = None,
         selected_joints: Optional[List[str]] = None,
+        tactile_mode: str = 'state_mean',
+        selected_tactile_topics: Optional[List[str]] = None,
+        tactile_baseline_samples: int = 20,
         source_rosbags: Optional[List[str]] = None,
     ) -> tuple:
         """
@@ -1418,6 +1452,9 @@ class Mp4ConversionWorker:
                 selected_state_topics=list(selected_state_topics or []),
                 selected_action_topics=list(selected_action_topics or []),
                 selected_joints=list(selected_joints or []),
+                tactile_mode=tactile_mode,
+                selected_tactile_topics=list(selected_tactile_topics or []),
+                tactile_baseline_samples=int(tactile_baseline_samples),
                 source_rosbags=list(source_rosbags or [dataset_path.name]),
             )
 
@@ -1460,6 +1497,9 @@ class Mp4ConversionWorker:
         selected_state_topics: Optional[List[str]] = None,
         selected_action_topics: Optional[List[str]] = None,
         selected_joints: Optional[List[str]] = None,
+        tactile_mode: str = 'state_mean',
+        selected_tactile_topics: Optional[List[str]] = None,
+        tactile_baseline_samples: int = 20,
         source_rosbags: Optional[List[str]] = None,
     ) -> tuple:
         """
@@ -1536,6 +1576,9 @@ class Mp4ConversionWorker:
                 selected_state_topics=list(selected_state_topics or []),
                 selected_action_topics=list(selected_action_topics or []),
                 selected_joints=list(selected_joints or []),
+                tactile_mode=tactile_mode,
+                selected_tactile_topics=list(selected_tactile_topics or []),
+                tactile_baseline_samples=int(tactile_baseline_samples),
                 source_rosbags=list(source_rosbags or [dataset_path.name]),
             )
 

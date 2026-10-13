@@ -28,8 +28,10 @@ string service_type
 # container Main runtime to publish robot command topics.
 string inference_mode
 
-# Action chunk request scheduling. "async" requests the next chunk while the
-# current buffer is still executing. "sync" waits until the buffer is empty.
+# Action chunk request scheduling. "async" uses latency/L2 alignment,
+# "async_ordered" prefetches near the tail and preserves full source order,
+# "sync" uses ordered refill with the general look-ahead window, and
+# "sync_step" waits for each selected action to drain before the next request.
 string action_request_mode
 
 # Policy acceleration mode. Empty and "pytorch" mean the normal model path.
