@@ -235,6 +235,9 @@ class Communicator:
             return False, 'Robot config has no initial-pose trigger topic'
         request_id = uuid.uuid4().hex
         with self._initial_pose_lock:
+            if (self._initial_pose_state in {'requested', 'running'}
+                    and time.monotonic() - self._initial_pose_requested_at < 150.0):
+                return True, 'Cycle Home is already running; tracking the active return'
             self._initial_pose_request_id = request_id
             self._initial_pose_state = 'requested'
             self._initial_pose_message = ''
@@ -269,7 +272,7 @@ class Communicator:
                 return True, 'Initial pose reached; ready for a fresh cycle'
             if self._initial_pose_state == 'failed':
                 return False, f'Cycle Home failed: {self._initial_pose_message}. Retry Cycle Home.'
-            if time.monotonic() - self._initial_pose_requested_at > 100.0:
+            if time.monotonic() - self._initial_pose_requested_at > 150.0:
                 return False, 'Cycle Home completion was not confirmed. Retry Cycle Home.'
             return False, 'Cycle Home is still running. Wait for both arms and hands to finish before Start.'
 
