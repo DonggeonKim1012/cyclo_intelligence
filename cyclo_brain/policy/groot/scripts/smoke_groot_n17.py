@@ -17,6 +17,10 @@ def print_module(name: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--synthetic-inference", action="store_true",
+        help="Run one non-actuating prediction using checkpoint-shaped synthetic inputs.",
+    )
+    parser.add_argument(
         "--model-path",
         default=None,
         help="Optional local or HuggingFace model path to load with Gr00tPolicy.",
@@ -59,14 +63,31 @@ def main() -> None:
     from gr00t.policy.gr00t_policy import Gr00tPolicy
 
     if args.model_path:
+        from runtime.inference_engine import GR00TInference
+
         print(f"loading_model={args.model_path}")
         policy = Gr00tPolicy(
             embodiment_tag=EmbodimentTag.resolve(args.embodiment_tag),
             model_path=args.model_path,
             device="cuda" if torch.cuda.is_available() else "cpu",
+            **GR00TInference.checkpoint_policy_kwargs(args.model_path),
         )
         print(f"loaded_policy={type(policy).__name__}")
         print(f"modality_keys={list(policy.modality_configs.keys())}")
+        if args.synthetic_inference:
+            import numpy as np
+
+            engine = GR00TInference()
+            engine.policy = policy
+            engine.init_policy_info()
+            observation = engine.build_synthetic_observation("Pick and hold two items")
+            action, _ = policy.get_action(observation)
+            chunk = engine.postprocess_action(action)
+            if not chunk.get("success") or not np.isfinite(chunk["action_chunk"]).all():
+                raise RuntimeError(f"Invalid synthetic prediction: {chunk}")
+            print(f"prediction_shape=({chunk['chunk_size']}, {chunk['action_dim']})")
+    elif args.synthetic_inference:
+        parser.error("--synthetic-inference requires --model-path")
 
 
 if __name__ == "__main__":
