@@ -53,6 +53,7 @@ import HFStatus from '../constants/HFStatus';
 import PageType from '../constants/pageType';
 import store from '../store/store';
 import rosConnectionManager from '../utils/rosConnectionManager';
+import { createSpeechQueue } from '../utils/speechQueue';
 import { useRosServiceCaller } from './useRosServiceCaller';
 import {
   hasRosTaskInfoPayload,
@@ -115,31 +116,28 @@ export function useRosTopicSubscription() {
     return () => window.speechSynthesis.removeEventListener('voiceschanged', pickVoice);
   }, []);
 
-  const speakText = useCallback(
-    (text, lang = 'en-US') => {
-      try {
-        if ('speechSynthesis' in window) {
-          window.speechSynthesis.cancel();
-          window.speechSynthesis.resume();
-          const utterance = new SpeechSynthesisUtterance(text);
-          utterance.lang = lang;
-          utterance.rate = 1.1;
-          utterance.pitch = 1.1;
-          utterance.volume = 1.0;
-          if (lang === 'en-US' && preferredVoiceRef.current) {
-            utterance.voice = preferredVoiceRef.current;
-          }
-          window.speechSynthesis.speak(utterance);
-          console.log(`Speech: "${text}"`);
-        } else {
-          console.warn('Speech synthesis not available');
-        }
-      } catch (error) {
-        console.warn('Speech failed:', error);
-      }
-    },
-    []
-  );
+  const speechQueueRef = useRef(null);
+
+  useEffect(() => {
+    const queue = createSpeechQueue({
+      getVoice: () => preferredVoiceRef.current,
+      onError: (error) => {
+        console.warn('Speech playback failed:', error);
+        toast.error(error === 'not-allowed'
+          ? 'Voice notifications blocked. Click this page to enable audio.'
+          : `Voice notification failed: ${error}`, { id: 'speech-error' });
+      },
+    });
+    speechQueueRef.current = queue;
+    return () => {
+      speechQueueRef.current = null;
+      queue.dispose();
+    };
+  }, []);
+
+  const speakText = useCallback((text, lang = 'en-US') => {
+    speechQueueRef.current?.speak(text, lang);
+  }, []);
 
   const notifyCameraMonitorIssues = useCallback(
     (cameraTopics) => {
@@ -233,7 +231,6 @@ export function useRosTopicSubscription() {
 
   const subscribeToRecordingStatus = useCallback(async () => {
     try {
-      const VOICE_DELAY = 100;
 
       const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
       if (!ros) return;
@@ -266,9 +263,7 @@ export function useRosTopicSubscription() {
           })
         ) {
           console.log('Recording started - speaking notification');
-          setTimeout(() => {
-            speakText('Recording started');
-          }, VOICE_DELAY);
+          speakText('Recording started');
           toast.success('Recording started!');
         }
         if (!monitorOnlyMessage) {
@@ -483,7 +478,6 @@ export function useRosTopicSubscription() {
 
   const subscribeToActionEvent = useCallback(async () => {
     try {
-      const VOICE_DELAY = 100;
       const ACTION_VOICE_MAP = {
         start: 'Recording started',
         finish: 'Recording finished',
@@ -512,9 +506,7 @@ export function useRosTopicSubscription() {
 
         const voiceText = ACTION_VOICE_MAP[action];
         if (voiceText) {
-          setTimeout(() => {
-            speakText(voiceText);
-          }, VOICE_DELAY);
+          speakText(voiceText);
         }
       });
 
