@@ -97,7 +97,12 @@ ENV UV_PROJECT_ENVIRONMENT=/gr00t/.venv
 ENV UV_HTTP_TIMEOUT=300
 ENV UV_CONCURRENT_DOWNLOADS=4
 ENV PATH="/gr00t/.venv/bin:/usr/local/cuda/bin:${PATH}"
-RUN uv sync --project /gr00t/scripts/deployment/orin --frozen --no-install-project --no-cache \
+RUN uv sync --project /gr00t/scripts/deployment/orin --frozen --no-install-project --no-cache
+
+# The root manifest targets desktop Python 3.12. Use Orin's Python 3.10
+# package metadata for the editable install inside this image as well.
+# Dependencies are already installed from the frozen Orin lockfile above.
+RUN cp /gr00t/scripts/deployment/orin/pyproject.toml /gr00t/pyproject.toml \
     && uv pip install --python /gr00t/.venv/bin/python --no-cache --no-deps -e /gr00t
 
 # nvidia-cudss-cu12 is needed by Jetson PyTorch at runtime. Install it with
