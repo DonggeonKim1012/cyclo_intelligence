@@ -11,11 +11,9 @@ TACTILE_STATE_MODE_FIELD = "cyclo_tactile_mode"
 TACTILE_STATE_MODE_OFF = "off"
 TACTILE_STATE_MODE_STATE_MEAN = "state_mean"
 TACTILE_MODE_LEFT_ZERO_RIGHT_BASELINE = "left_zero_right_baseline"
-TACTILE_MODE_BOTH_EPISODE_BASELINE = "both_episode_baseline"
 VALID_TACTILE_RUNTIME_MODES = frozenset(
     {
         TACTILE_MODE_LEFT_ZERO_RIGHT_BASELINE,
-        TACTILE_MODE_BOTH_EPISODE_BASELINE,
     }
 )
 VALID_TACTILE_STATE_MODES = frozenset(
@@ -50,10 +48,3 @@ def tactile_state_mode(policy_or_config: Any) -> str:
     if mode not in VALID_TACTILE_STATE_MODES:
         raise RuntimeError(f"Unsupported tactile state mode: {mode!r}")
     return mode
-
-
-def set_tactile_runtime_mode(config: Any, mode: str) -> None:
-    normalized = str(mode).strip()
-    if normalized not in VALID_TACTILE_RUNTIME_MODES:
-        raise ValueError(f"Unsupported tactile runtime mode: {normalized!r}")
-    setattr(config, TACTILE_RUNTIME_MODE_FIELD, normalized)

@@ -21,10 +21,8 @@ import torch
 from .constants import STATE_KEY as _STATE_KEY
 from .image_preprocessing import prepare_policy_image
 from .tactile_runtime import (
-    TACTILE_MODE_BOTH_EPISODE_BASELINE,
     TACTILE_STATE_MODE_STATE_MEAN,
     tactile_state_mode,
-    tactile_runtime_mode,
 )
 
 
@@ -216,7 +214,6 @@ class PreprocessingMixin:
         )
         history_size = getattr(config, "tactile_history_size", None)
         raw_history_hz = getattr(config, "tactile_history_hz", None)
-        runtime_mode = tactile_runtime_mode(config)
         history_hz = None
         if native_trex:
             if (
@@ -253,10 +250,7 @@ class PreprocessingMixin:
             baseline_key = f"{_TACTILE_BASELINE_KEY_PREFIX}{side}"
             baseline_feature = input_features.get(baseline_key)
 
-            if (
-                side == "left"
-                and runtime_mode != TACTILE_MODE_BOTH_EPISODE_BASELINE
-            ):
+            if side == "left":
                 if native_trex:
                     raise RuntimeError(
                         "Native SH5 T-Rex cannot consume left tactile input"
@@ -321,10 +315,7 @@ class PreprocessingMixin:
                         f"{sensor_name} tactile input contains NaN or Inf"
                     )
 
-                if (
-                    side == "right"
-                    or runtime_mode == TACTILE_MODE_BOTH_EPISODE_BASELINE
-                ):
+                if side == "right":
                     baseline = getattr(
                         self,
                         "_tactile_baselines",

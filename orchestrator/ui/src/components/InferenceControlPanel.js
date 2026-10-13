@@ -438,7 +438,6 @@ export default function InferenceControlPanel() {
     !isSwitchingModel && !isPreloadingModel && !switchNeedsClear && (isInferencing || isPaused) &&
     taskInfo.inferenceMode === 'robot' &&
     (
-      (taskInfo.serviceType === 'lerobot' && taskInfo.policyType === 'tactile_act') ||
       (taskInfo.serviceType === 'vitacformer' && taskInfo.policyType === 'vitacformer') ||
       (taskInfo.serviceType === 'groot' && robotType === 'ffw_sh5_rev1')
     )

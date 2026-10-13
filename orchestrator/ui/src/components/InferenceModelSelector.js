@@ -38,7 +38,6 @@ const MODEL_GROUPS = [
     options: [
       { value: 'lerobot:act', label: 'ACT', serviceType: 'lerobot', policyType: 'act' },
       { value: 'lerobot:diffusion', label: 'Diffusion', serviceType: 'lerobot', policyType: 'diffusion' },
-      { value: 'lerobot:tactile_act', label: 'Tactile ACT', serviceType: 'lerobot', policyType: 'tactile_act' },
       { value: 'lerobot:smolvla', label: 'SmolVLA', serviceType: 'lerobot', policyType: 'smolvla' },
       { value: 'lerobot:xvla', label: 'XVLA', serviceType: 'lerobot', policyType: 'xvla' },
       { value: 'lerobot:pi0', label: 'Pi0', serviceType: 'lerobot', policyType: 'pi0' },

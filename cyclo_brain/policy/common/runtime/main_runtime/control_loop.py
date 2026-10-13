@@ -1568,12 +1568,8 @@ class ControlLoop:
             ACTION_REQUEST_MODE_SYNC,
             ACTION_REQUEST_MODE_SYNC_STEP,
         }:
-            # Compatibility path for SH5 TactileACT's proven smooth run.
-            # Sample the next observation only after the selected source
-            # action has drained.  The request latency intentionally becomes
-            # a hold at the last reference instead of a stale prefetch; this
-            # preserves the slow, damped physical loop that previously
-            # completed task motion without 0.13-second boundary chatter.
+            # Sequential requests sample observations after the source action
+            # drains and hold the last reference while inference is pending.
             return processor.buffer_size <= 0
         if self._action_request_mode == ACTION_REQUEST_MODE_SYNC_PREFETCH:
             # Sequential mode keeps chunk order and disables time/L2 skipping,

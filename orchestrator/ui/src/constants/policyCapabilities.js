@@ -18,7 +18,6 @@ export const POLICY_REQUIRES_INSTRUCTION = {
   'groot:n17': true,
   'lerobot:act': false,
   'lerobot:diffusion': false,
-  'lerobot:tactile_act': false,
   'vitacformer:vitacformer': false,
   'lerobot:smolvla': true,
   'lerobot:xvla': true,
@@ -39,23 +38,18 @@ export const DEFAULT_REQUIRES_INSTRUCTION = false;
 // runtime profile because TaskInfo.inference_hz is an integer ROS field.
 export const POLICY_DEFAULT_INFERENCE_HZ = {
   'lerobot:act': 30,
-  'lerobot:tactile_act': 30,
   'vitacformer:vitacformer': 30,
 };
 
 export const DEFAULT_INFERENCE_HZ = 15;
 
-// Vanilla ACT uses its configured execution horizon in deterministic append
-// order. SH5 TactileACT keeps its four-step closed-loop horizon and performs
-// time-aligned decoder overlap ensembling at ordered asynchronous replans.
+// Vanilla ACT uses its configured execution horizon in deterministic append order.
 export const POLICY_REQUIRED_ACTION_REQUEST_MODE = {
   'lerobot:act': 'sync',
-  'lerobot:tactile_act': 'async_ordered',
   'vitacformer:vitacformer': 'async',
 };
 
 export const POLICY_USES_TACTILE_INPUT = {
-  'lerobot:tactile_act': true,
   'lerobot:trex': true,
   'vitacformer:vitacformer': true,
 };

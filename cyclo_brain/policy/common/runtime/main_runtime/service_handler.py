@@ -8,12 +8,10 @@
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import threading
 import time
-from pathlib import Path
 from typing import List, Optional
 
 
@@ -150,13 +148,7 @@ class ServiceHandler:
 
     @staticmethod
     def _effective_action_request_mode(request) -> str:
-        """Select artifact-safe scheduling even for a stale UI bundle.
-
-        SH5 TactileACT returns its saved four-step execution horizon with
-        time-aligned overlap ensembling.  Ordered asynchronous refill keeps
-        100 Hz output continuous without legacy L2 row skipping or a stale
-        one-second queue.
-        """
+        """Apply an explicit scheduling override or use the requested mode."""
         requested = str(
             getattr(request, "action_request_mode", "async") or "async"
         ).strip().lower()
@@ -167,19 +159,6 @@ class ServiceHandler:
         if forced:
             return forced
 
-        root = Path(str(getattr(request, "model_path", "") or ""))
-        config_path = root / "config.json"
-        nested = root / "pretrained_model" / "config.json"
-        if not config_path.is_file() and nested.is_file():
-            config_path = nested
-        if not config_path.is_file():
-            return requested or "async"
-        try:
-            payload = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            return requested or "async"
-        if str(payload.get("type", "")).strip().lower() == "tactile_act":
-            return "async_ordered"
         return requested or "async"
 
     @staticmethod

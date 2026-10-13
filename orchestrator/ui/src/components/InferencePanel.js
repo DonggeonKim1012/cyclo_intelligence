@@ -604,9 +604,7 @@ const InferencePanel = () => {
         <div className={clsx(classLabel, 'flex', 'items-center', 'gap-1')}>
           <Tooltip
             content={lockedActionRequestMode
-              ? lockedActionRequestMode === 'async_ordered'
-                ? 'Tactile ACT uses four-step closed-loop replanning with time-aligned overlap ensembling and continuous 100 Hz output.'
-                : info.serviceType === 'vitacformer' && info.policyType === 'vitacformer'
+              ? info.serviceType === 'vitacformer' && info.policyType === 'vitacformer'
                   ? 'ViTacFormer uses latency-aligned asynchronous replanning for its saved 30 Hz action trajectory.'
                 : 'Vanilla ACT requires sequential Sync requests to preserve n_action_steps execution.'
               : 'Choose when the next action chunk is requested.'}

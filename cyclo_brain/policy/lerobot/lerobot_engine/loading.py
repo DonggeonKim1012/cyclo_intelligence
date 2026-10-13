@@ -56,13 +56,6 @@ class LoadingMixin:
                 continue
             reset()
             logger.info("Reset LeRobot %s runtime state", label)
-        reset_prediction = getattr(
-            self,
-            "_reset_prediction_runtime_state",
-            None,
-        )
-        if callable(reset_prediction):
-            reset_prediction()
 
     @staticmethod
     def _uses_native_trex_loader(
@@ -143,7 +136,6 @@ class LoadingMixin:
 
         config_path = Path(model_path) / "config.json"
         config_payload = {}
-        tactile_act_loaded = False
         if config_path.exists():
             with open(config_path) as f:
                 config_payload = json.load(f)
@@ -192,31 +184,8 @@ class LoadingMixin:
                 tactile_input_keys,
             )
             policy = load_trex_policy(model_path, device)
-        elif (
-            policy_type in {"act", "tactile_act"}
-            and has_tactile_metadata
-            and tactile_input_keys
-        ):
-            from .tactile_act import load_tactile_act_policy
-
-            logger.info(
-                "Detected tactile ACT checkpoint: expert_hidden_dim=%s, inputs=%s",
-                config_payload["tactile_expert_hidden_dim"],
-                tactile_input_keys,
-            )
-            policy = load_tactile_act_policy(
-                model_path,
-                config_payload,
-                device,
-            )
-            tactile_act_loaded = True
-        elif policy_type == "tactile_act":
-            raise ValueError(
-                "tactile_act checkpoint requires tactile_expert_hidden_dim "
-                "and observation.tactile.* input features"
-            )
-        elif policy_type == "act" and has_tactile_metadata:
-            from .tactile_act import (
+        elif policy_type == "act" and has_tactile_metadata and not tactile_input_keys:
+            from .act_config_compat import (
                 load_standard_act_with_legacy_tactile_metadata,
             )
 
@@ -248,37 +217,6 @@ class LoadingMixin:
             logger.info("FastWAM weights loaded on CPU for selective offload")
         else:
             policy = policy.to(device).eval()
-        if tactile_act_loaded:
-            # Execute the saved four-step closed-loop horizon while retaining
-            # the decoder tail solely as a time-aligned overlap estimate for
-            # later replans.  This removes four-step boundary discontinuities
-            # without turning the 16-step decoder horizon into open-loop
-            # execution.  The marker is runtime-only; checkpoint files and the
-            # saved ACT config remain untouched.
-            setattr(policy, "_cyclo_overlap_action_ensemble", True)
-            setattr(policy, "_cyclo_overlap_action_ensemble_coeff", -0.01)
-            # Keep enough damping to avoid the previously observed stationary
-            # chatter, while reducing the lag/attenuation of brief contact
-            # motions used to separate nested paper cups. This is an
-            # inference-only A/B profile; checkpoint weights and processors
-            # remain unchanged.
-            setattr(policy, "_cyclo_overlap_action_smoothing_alpha", 0.85)
-            logger.info(
-                "TactileACT execution profile: four-step overlap ensemble "
-                "(n_action_steps=%s decoder chunk=%s coeff=%s ema_alpha=%s)",
-                getattr(policy.config, "n_action_steps", "unknown"),
-                getattr(policy.config, "chunk_size", "unknown"),
-                getattr(
-                    policy,
-                    "_cyclo_overlap_action_ensemble_coeff",
-                    "unknown",
-                ),
-                getattr(
-                    policy,
-                    "_cyclo_overlap_action_smoothing_alpha",
-                    "unknown",
-                ),
-            )
         if policy_type != "fastwam":
             logger.info("Policy weights loaded on %s", device)
 

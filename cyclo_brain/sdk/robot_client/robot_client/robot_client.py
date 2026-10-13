@@ -628,7 +628,7 @@ class RobotClient:
                     # ``values`` remains the backwards-compatible per-finger
                     # mean view used by flat observation.state policies.
                     "values": taxels.mean(axis=(1, 2), dtype=np.float32),
-                    # Custom tactile ACT consumes every 3x3 taxel.
+                    # Preserve every 3x3 taxel for tactile policies.
                     "taxels": taxels,
                     "hand_name": str(getattr(msg, "hand_name", "") or ""),
                     "received_monotonic": time.monotonic(),

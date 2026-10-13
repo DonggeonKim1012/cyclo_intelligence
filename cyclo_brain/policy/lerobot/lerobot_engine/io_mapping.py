@@ -33,7 +33,6 @@ import numpy as np
 
 from .constants import IMAGE_KEY_PREFIX as _IMAGE_KEY_PREFIX
 from .tactile_runtime import (
-    TACTILE_MODE_BOTH_EPISODE_BASELINE,
     TACTILE_STATE_MODE_STATE_MEAN,
     tactile_state_mode,
     tactile_runtime_mode,
@@ -243,14 +242,10 @@ class IoMappingMixin:
         required_sensors = ["odom"] if self._has_mobile_state else []
         if getattr(self, "_uses_flat_tactile_state", False):
             required_sensors.extend(getattr(self, "_tactile_modalities", []) or [])
-        runtime_mode = tactile_runtime_mode(self._policy)
         required_sensors.extend(
             sensor_name
             for policy_key, sensor_name in self._tactile_inputs.items()
-            if (
-                runtime_mode == TACTILE_MODE_BOTH_EPISODE_BASELINE
-                or policy_key.rsplit(".", 1)[-1].lower() != "left"
-            )
+            if policy_key.rsplit(".", 1)[-1].lower() != "left"
         )
 
         def missing() -> list[str]:
@@ -330,14 +325,10 @@ class IoMappingMixin:
             )
         )
         baselines: Dict[str, np.ndarray] = {}
-        runtime_mode = tactile_runtime_mode(self._policy)
 
         for policy_key, sensor_name in self._tactile_inputs.items():
             side = policy_key.rsplit(".", 1)[-1].lower()
-            if (
-                side == "left"
-                and runtime_mode != TACTILE_MODE_BOTH_EPISODE_BASELINE
-            ):
+            if side == "left":
                 # The corrected training set contains an all-zero left hand.
                 # Do not read or calibrate live left tactile at inference.
                 continue

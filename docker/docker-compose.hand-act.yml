@@ -17,18 +17,8 @@ services:
       POSTPROCESS_ACTIONS: "true"
       ACTION_ALIGNMENT_MODE: "l2"
       CHUNK_ALIGN_WINDOW_S: "0.3"
-      # Preserve the original general ACT look-ahead used by ordinary
-      # async/sync modes and captured in the pre-TactileACT SH5 backups.
-      # TactileACT ordered-async uses the separate short near-tail margin
-      # below, so it neither queues one second of stale chunks nor invokes
-      # latency/L2 source-row skipping.
+      # General ACT look-ahead for asynchronous and synchronous requests.
       REFILL_MARGIN_S: "1.0"
-      # TactileACT executes its saved four-step horizon while decoder tails
-      # contribute only time-aligned overlap estimates at the next replan.
-      # One 30 Hz source period prefetches the next four-action response in
-      # time for continuous 100 Hz publishing without accumulating stale
-      # observation-conditioned chunks.
-      ORDERED_ASYNC_REFILL_MARGIN_S: "0.03"
       REFILL_LATENCY_WARMUP_SAMPLES: "1"
       REFILL_LATENCY_SAMPLE_MAX_S: "2.0"
       GET_ACTION_TIMEOUT_S: "10.0"
@@ -64,21 +54,8 @@ services:
       REAL_SOURCE_STEP_BRIDGE_MAX_RAW_DELTA_BY_KEY: "arm_left=0.09,arm_right=0.12,hand_left=0.30,hand_right=0.28"
       REAL_JOINT_LIMIT_MODE: "clamp"
       REAL_JOINT_LIMIT_TOLERANCE_RAD: "0.02"
-      # All 97 recordings commanded these shoulder-pitch joints beyond their
-      # zero boundary while follower state saturated at zero. The tactile ACT
-      # left-hand joint6 training range starts exactly at 0.0 rad; observed
-      # decoder extrapolation reached -0.028154 rad after switching policies.
-      # The full-chunk Async TactileACT run also reached -0.026017 rad on
-      # finger_l_joint14, whose recorded action range is 0.0..1.5 rad. A later
-      # long rollout reached the final cup before one finger_l_joint10 decoder
-      # row extrapolated to -0.024089 rad; that joint has the same recorded
-      # 0.0..1.5-rad action and 0.0..2.0-rad URDF range. A subsequent cycle
-      # produced the same bounded tail on finger_l_joint18 (-0.020227 rad),
-      # whose recorded and URDF ranges are likewise 0.0..1.5 and 0.0..2.0.
-      # Permit only these
-      # narrow negative tails, then clamp every published value back to the
-      # legal 0.0-rad URDF boundary. Values beyond the joint-specific caps and
-      # all other joints still fail closed.
-      REAL_JOINT_LIMIT_TOLERANCE_BY_JOINT: "arm_l_joint2=0.18,arm_r_joint2=0.26,finger_l_joint6=0.05,finger_l_joint10=0.04,finger_l_joint14=0.04,finger_l_joint18=0.04"
+      # Recorded shoulder-pitch commands extend beyond the zero boundary;
+      # clamp only these dataset-audited tails to the legal URDF boundary.
+      REAL_JOINT_LIMIT_TOLERANCE_BY_JOINT: "arm_l_joint2=0.18,arm_r_joint2=0.26"
       REAL_STATE_MAX_AGE_S: "0.5"
       REAL_START_DEADLINE_S: "15.0"

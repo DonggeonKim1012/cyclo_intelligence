@@ -2947,7 +2947,7 @@ class OrchestratorNode(Node):
     LEROBOT_POLICIES = {
         'tdmpc', 'diffusion', 'act', 'vqbet', 'pi0', 'pi0_fast', 'pi05',
         'smolvla', 'trex', 'xvla', 'gaussian_actor',
-        'molmoact2', 'vla_jepa', 'fastwam', 'tactile_act', 'sac',
+        'molmoact2', 'vla_jepa', 'fastwam', 'sac',
     }
 
     @staticmethod

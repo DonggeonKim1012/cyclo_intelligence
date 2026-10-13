@@ -134,8 +134,6 @@ class LeRobotEngine(
         # expected size. If config doesn't expose a target shape for a
         # camera, we leave that image at native resolution.
         self._image_resize: Dict[str, tuple[int, int]] = {}
-        self._act_overlap_tails: list[torch.Tensor] = []
-        self._act_overlap_last_action: torch.Tensor | None = None
 
     # ------------------------------------------------------------------ #
     # InferenceEngine API
@@ -237,8 +235,8 @@ class LeRobotEngine(
     def reset_cycle(self) -> Dict[str, Any]:
         """Reset episode-scoped runtime state without reloading weights.
 
-        A new manipulation cycle must not inherit ACT overlap tails, policy
-        queues, processor state, or tactile zero offsets from the completed
+        A new manipulation cycle must not inherit policy queues, processor
+        state, or tactile zero offsets from the completed
         cycle. Recreating RobotClient also obtains a fresh synchronized sensor
         snapshot. Model/pre/postprocessor objects remain resident on the GPU.
         """
@@ -291,8 +289,6 @@ class LeRobotEngine(
         self._loaded_model_path = None
         self._loaded_robot_type = None
         self._image_resize = {}
-        self._act_overlap_tails = []
-        self._act_overlap_last_action = None
 
         self._cameras = {}
         self._state_modalities = []
