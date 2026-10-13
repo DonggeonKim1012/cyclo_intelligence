@@ -5,6 +5,7 @@ import rosConnectionManager from '../utils/rosConnectionManager';
 
 const MESSAGE_TYPE = 'robotis_interfaces/msg/HandPressures';
 const UPDATE_INTERVAL_MS = 50;
+const RECONNECT_INTERVAL_MS = 1000;
 const FINGER_COUNT = 5;
 const TAXEL_COUNT = 9;
 
@@ -66,6 +67,18 @@ export default function useTactilePressureSubscription(enabled = true) {
 
     let cancelled = false;
     const subscriptions = [];
+    let subscribedRos = null;
+    let connecting = false;
+    let retryTimer;
+
+    const unsubscribe = () => {
+      subscriptions.splice(0).forEach((topic) => {
+        try {
+          topic.unsubscribe();
+        } catch (_error) {}
+      });
+      subscribedRos = null;
+    };
 
     const subscribe = (ros, side, topicName) => {
       const topic = new ROSLIB.Topic({
@@ -90,16 +103,31 @@ export default function useTactilePressureSubscription(enabled = true) {
     };
 
     const connect = async () => {
+      if (cancelled || connecting) return;
+      connecting = true;
       try {
+        // Other panels may replace the shared Ros after a bridge restart.
+        // Always reacquire it instead of retaining subscriptions on an old socket.
         const ros = await rosConnectionManager.getConnection(rosbridgeUrl);
-        if (cancelled || !ros) return;
+        if (cancelled) return;
+        if (!ros || !ros.isConnected) {
+          unsubscribe();
+          return;
+        }
+        if (subscribedRos === ros) return;
+        unsubscribe();
         Object.entries(HAND_TOPICS).forEach(([side, topicName]) => {
           subscribe(ros, side, topicName);
         });
+        subscribedRos = ros;
       } catch (error) {
         if (!cancelled) {
+          unsubscribe();
           console.error('Tactile pressure ROS connection error:', error);
         }
+      } finally {
+        connecting = false;
+        if (!cancelled) retryTimer = setTimeout(connect, RECONNECT_INTERVAL_MS);
       }
     };
 
@@ -107,11 +135,8 @@ export default function useTactilePressureSubscription(enabled = true) {
 
     return () => {
       cancelled = true;
-      subscriptions.forEach((topic) => {
-        try {
-          topic.unsubscribe();
-        } catch (_error) {}
-      });
+      clearTimeout(retryTimer);
+      unsubscribe();
     };
   }, [enabled, rosbridgeUrl]);
 
