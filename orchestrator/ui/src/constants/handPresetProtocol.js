@@ -283,6 +283,7 @@ export function parseHandPresetStatus(message) {
 
   return {
     presetIds,
+    controlProfile: typeof payload.control_profile === 'string' ? payload.control_profile : '',
     presets: presetsWithEditorCurls,
     previewJointNames,
     customEditor,

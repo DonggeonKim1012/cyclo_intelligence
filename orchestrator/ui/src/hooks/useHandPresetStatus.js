@@ -14,6 +14,7 @@ export default function useHandPresetStatus(enabled = true) {
   const [status, setStatus] = useState(null);
 
   useEffect(() => {
+    setStatus(null);
     if (!enabled || !rosbridgeUrl) {
       setStatus(null);
       return undefined;
@@ -36,9 +37,7 @@ export default function useHandPresetStatus(enabled = true) {
         topic.subscribe((message) => {
           if (cancelled) return;
           const parsed = parseHandPresetStatus(message);
-          if (parsed) {
-            setStatus({ ...parsed, receivedAt: Date.now() });
-          }
+          setStatus(parsed ? { ...parsed, receivedAt: Date.now() } : null);
         });
       } catch (error) {
         if (!cancelled) {

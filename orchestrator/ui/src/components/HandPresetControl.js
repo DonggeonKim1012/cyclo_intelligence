@@ -28,9 +28,10 @@ export default function HandPresetControl({ enabled = true }) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isModalOpen]);
 
-  if (!enabled) return null;
-
   const isOnline = Boolean(status) && now - status.receivedAt <= STATUS_STALE_AFTER_MS;
+  // No SH5-only panel for other leader profiles or stale bridge instances.
+  if (!enabled || !isOnline || status.controlProfile !== 'lg2_mini_sh5_recording') return null;
+
   const modal = isModalOpen && createPortal(
     <HandPresetDialog
       status={status}

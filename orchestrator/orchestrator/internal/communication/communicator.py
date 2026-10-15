@@ -146,6 +146,8 @@ class Communicator:
         # and joystick_trigger_callback both run under
         # MultiThreadedExecutor and would otherwise race on the dict.
         self._joystick_lock = threading.Lock()
+        self._leader_control_profile = ('', 0.0)
+        self._leader_profile_sub = None
 
         # Joystick handler callback for immediate processing
         self._joystick_handler: Optional[Callable[[str], None]] = None
@@ -185,9 +187,34 @@ class Communicator:
             self.joystick_trigger_callback,
             10
         )
+        if getattr(self.node, 'robot_type', '') == 'ffw_sh5_rev1':
+            self._leader_profile_sub = self.node.create_subscription(
+                String, '/leader/hand_preset/status', self._leader_profile_callback,
+                QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                           durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.node.get_logger().info(
             f'Joystick trigger subscriber initialized: {trigger_topic}'
         )
+
+    def _leader_profile_callback(self, message):
+        try:
+            payload = json.loads(message.data)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(payload, dict):
+            return
+        profile = payload.get('control_profile', '')
+        if not isinstance(profile, str):
+            return
+        with self._joystick_lock:
+            self._leader_control_profile = (profile, time.monotonic())
+
+    def get_leader_control_profile(self):
+        with self._joystick_lock:
+            profile, received = self._leader_control_profile
+        if profile and time.monotonic() - received > 3.0:
+            return 'unavailable'
+        return profile
 
     def init_publishers(self):
         """Initialize publishers."""
@@ -610,6 +637,9 @@ class Communicator:
             self._destroy_publisher_if_exists(publisher_name)
 
     def _cleanup_subscribers(self):
+        if self._leader_profile_sub is not None:
+            self.node.destroy_subscription(self._leader_profile_sub)
+            self._leader_profile_sub = None
         if self._initial_pose_status_sub is not None:
             self.node.destroy_subscription(self._initial_pose_status_sub)
             self._initial_pose_status_sub = None

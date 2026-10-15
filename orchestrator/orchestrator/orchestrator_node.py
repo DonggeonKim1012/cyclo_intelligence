@@ -3488,10 +3488,8 @@ class OrchestratorNode(Node):
         """
         Handle leader tact triggers as backend-owned recording controls.
 
-        A short click remains dedicated to mini-leader arm enable/disable.
-        A right long press toggles start/save; a left long press cancels the
-        active recording. Keeping recording on long presses prevents one tact
-        click from changing arm control and recording state at the same time.
+        Legacy robots keep right/left short-click recording controls. Only
+        the explicitly advertised LG2 mini + SH5 profile uses long presses.
         """
         self.get_logger().info(f'Joystick trigger: {joystick_mode}')
 
@@ -3500,9 +3498,11 @@ class OrchestratorNode(Node):
                 f'Joystick trigger ignored without communicator: {joystick_mode}')
             return
 
-        recording_action = get_joystick_recording_action(joystick_mode)
+        control_profile = (self.communicator.get_leader_control_profile()
+                           if self.robot_type == 'ffw_sh5_rev1' else '')
+        recording_action = get_joystick_recording_action(joystick_mode, control_profile)
         if recording_action is None:
-            if joystick_mode in ARM_TOGGLE_TRIGGERS:
+            if control_profile == 'lg2_mini_sh5_recording' and joystick_mode in ARM_TOGGLE_TRIGGERS:
                 self.get_logger().debug(
                     f'Short {joystick_mode} click reserved for mini-leader '
                     'arm enable/disable; no recording action')
