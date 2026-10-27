@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec bash /validation/web/cyclo-command.sh "$@"
