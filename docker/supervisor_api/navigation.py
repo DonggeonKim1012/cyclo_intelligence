@@ -49,6 +49,7 @@ from supervisor_api.navigation_grid_cache import (
     ensure_ros_grid_subscriber_started,
 )
 from supervisor_api.navigation_missions import remove_map_missions
+from supervisor_api.navigation_spots import map_spots_directory_for_removal, remove_map_spots
 
 
 router = APIRouter(prefix="/navigation", tags=["navigation"])
@@ -57,13 +58,17 @@ AI_WORKER_CONTAINER = os.environ.get(
     "CYCLO_NAVIGATION_CONTAINER", "ai_worker"
 )
 NAVIGATION_SERVICE = "ai_worker_navigation"
+# Explicit opt-in for development containers without s6. Production is unchanged.
+NAVIGATION_BACKEND = os.environ.get("CYCLO_NAVIGATION_BACKEND", "s6")
+if NAVIGATION_BACKEND not in ("s6", "process"):
+    raise ValueError("CYCLO_NAVIGATION_BACKEND must be s6 or process")
 MAPS_DIR = PurePosixPath(
-    "/root/ros2_ws/src/ai_worker/ffw_navigation/maps"
+    os.environ.get("CYCLO_NAVIGATION_MAPS_DIR", "/root/ros2_ws/src/ai_worker/ffw_navigation/maps")
 )
 LOCALIZATION_PGID_FILE = "/run/cyclo_navigation_localization.pgid"
 LOCALIZATION_LOG_FILE = "/var/log/cyclo_navigation_localization.log"
 NAVIGATION_PARAMS_FILE = (
-    "/root/ros2_ws/src/ai_worker/ffw_navigation/config/navigation.yaml"
+    os.environ.get("CYCLO_NAVIGATION_PARAMS_FILE", "/root/ros2_ws/src/ai_worker/ffw_navigation/config/navigation.yaml")
 )
 MAP_SAVE_CLI_TIMEOUT_SECONDS = 20
 SAVE_MAP_WAIT_SECONDS = 12.0
@@ -366,6 +371,14 @@ def _s6_command(
     retries: int = 0,
     retry_delay: float = 0.2,
 ):
+    if NAVIGATION_BACKEND == "process":
+        if service != NAVIGATION_SERVICE:
+            raise HTTPException(422, "Unsupported process service")
+        if action in ("down", "restart"):
+            _force_stop_navigation_processes()
+        if action == "down":
+            return "Navigation stopped"
+        return _start_navigation_process()
     control = (
         'S6_RC=$(ls /package/admin/s6-*/command/s6-rc 2>/dev/null | head -1); '
         '[ -z "$S6_RC" ] && S6_RC=$(command -v s6-rc 2>/dev/null); '
@@ -405,6 +418,8 @@ def _sync_s6_service_down_best_effort(service: str) -> str:
 
 def _request_s6_service_down(service: str) -> str:
     """Ask s6-supervise to stop a service without waiting for full teardown."""
+    if NAVIGATION_BACKEND == "process":
+        return _force_stop_navigation_processes()
     script = (
         'S6_SVC=$(ls /package/admin/s6-*/command/s6-svc 2>/dev/null | head -1); '
         '[ -z "$S6_SVC" ] && S6_SVC=$(command -v s6-svc 2>/dev/null); '
@@ -525,6 +540,10 @@ exit 0
 
 
 def _service_status(service: str) -> NavigationStatus:
+    if NAVIGATION_BACKEND == "process":
+        status = _localization_status(f"/run/{NAVIGATION_SERVICE}.pgid")
+        status.mode = _runtime_mode() if status.is_up else None
+        return status
     script = (
         'S6_SVSTAT=$(ls /package/admin/s6-*/command/s6-svstat '
         '2>/dev/null | head -1); '
@@ -556,9 +575,9 @@ def _runtime_mode() -> Optional[str]:
     return mode or None
 
 
-def _localization_status() -> NavigationStatus:
+def _localization_status(pgid_file: str = LOCALIZATION_PGID_FILE) -> NavigationStatus:
     script = f"""
-PGID_FILE={shlex.quote(LOCALIZATION_PGID_FILE)}
+PGID_FILE={shlex.quote(pgid_file)}
 if [ ! -f "${{PGID_FILE}}" ]; then
   echo "down"
   exit 3
@@ -835,6 +854,9 @@ def _map_yaml_metadata_for_pgm(path: PurePosixPath) -> dict[str, object]:
 
 
 def _ros_shell_prefix() -> str:
+    runtime_setup = os.environ.get("CYCLO_NAVIGATION_ROS_SETUP")
+    if runtime_setup:
+        return f"source {shlex.quote(runtime_setup)} || exit $?; "
     return (
         'for setup_file in /opt/ros/*/setup.bash; do '
         '[ -f "$setup_file" ] && source "$setup_file" && break; done; '
@@ -845,12 +867,51 @@ def _ros_shell_prefix() -> str:
 
 def _ros_exec_environment() -> dict[str, str]:
     """Keep one-shot ROS CLI processes on the server's ROS graph."""
-    return {
+    environment = {
         "ROS_DOMAIN_ID": os.environ.get("ROS_DOMAIN_ID", "30"),
         "RMW_IMPLEMENTATION": os.environ.get(
             "RMW_IMPLEMENTATION", "rmw_zenoh_cpp"
         ),
     }
+    if "ZENOH_CONFIG_OVERRIDE" in os.environ:
+        environment["ZENOH_CONFIG_OVERRIDE"] = os.environ["ZENOH_CONFIG_OVERRIDE"]
+    return environment
+
+
+def _start_navigation_process() -> str:
+    """Same launch as the s6 service, in a tracked, independently stoppable group."""
+    mode = _runtime_mode()
+    if mode not in ("map", "nav"):
+        raise HTTPException(422, "Navigation mode must be map or nav")
+    code, args = _exec(["cat", f"/run/launch_args/{NAVIGATION_SERVICE}"])
+    if code:
+        raise HTTPException(503, "Missing navigation launch arguments")
+    match = re.fullmatch(r"map_name:=([A-Za-z0-9_.-]+)\s*", args)
+    if not match:
+        raise HTTPException(422, "Invalid navigation launch arguments")
+    map_name = _validate_map_name(match.group(1))
+    command = _ros_shell_prefix() + "exec ros2 launch ffw_navigation navigation.launch.py rviz:=false "
+    command += f"params_file:={shlex.quote(NAVIGATION_PARAMS_FILE)} "
+    command += "use_slam:=true" if mode == "map" else f"map:={shlex.quote(str(MAPS_DIR / (map_name + '.yaml')))}"
+    script = f"""
+set -e
+mkdir -p /var/log/{NAVIGATION_SERVICE}
+nohup setsid bash --noprofile --norc -c {shlex.quote(command)} \
+  >> /var/log/{NAVIGATION_SERVICE}/current 2>&1 < /dev/null &
+PID=$!
+echo "$PID" > /run/{NAVIGATION_SERVICE}.pgid
+sleep 2
+if ! kill -0 -- -"$PID" 2>/dev/null; then
+  tail -40 /var/log/{NAVIGATION_SERVICE}/current
+  exit 1
+fi
+echo "Navigation launch started pid=$PID mode={mode} (check status/logs for readiness)"
+"""
+    code, output = _exec(["bash", "--noprofile", "--norc", "-c", script],
+                         environment=_ros_exec_environment())
+    if code:
+        raise HTTPException(503, output or "Navigation launch failed")
+    return output
 
 
 def _save_map_with_cli(map_name: str) -> str:
@@ -873,12 +934,37 @@ def _save_map_with_cli(map_name: str) -> str:
     return output or "map_saver_cli complete"
 
 
+def _localization_clock() -> str:
+    if NAVIGATION_BACKEND == "process":
+        # Process deployments have no s6 service script. Read the running robot's
+        # clock instead of assuming wall time or trying to launch that script.
+        command = (_ros_shell_prefix()
+                   + "timeout 10s ros2 param get /controller_manager use_sim_time --no-daemon --spin-time 1 --timeout 5")
+        code, output = _exec(
+            ["bash", "--noprofile", "--norc", "-c", command],
+            environment=_ros_exec_environment(),
+        )
+        match = re.search(r"^Boolean value is: (True|False)\s*$", output or "", re.MULTILINE)
+        if code == 0 and match:
+            return match.group(1).lower()
+        raise HTTPException(503, f"Robot clock unavailable: {output}")
+    code, clock = _exec(
+        ["bash", "-c", "bash /etc/s6-overlay/s6-rc.d/ai_worker_navigation/run --resolve-clock"],
+        environment=_ros_exec_environment(),
+    )
+    clock = (clock or "").strip()
+    if code != 0 or clock not in ("true", "false"):
+        raise HTTPException(503, f"Robot clock unavailable: {clock}")
+    return clock
+
+
 def _start_localization_process(map_name: str) -> str:
+    clock = _localization_clock()
     map_path = MAPS_DIR / f"{map_name}.yaml"
     ros_command = (
         _ros_shell_prefix()
         + "exec ros2 launch nav2_bringup localization_launch.py "
-        + f"use_sim_time:=false "
+        + f"use_sim_time:={clock} "
         + f"map:={shlex.quote(str(map_path))} "
         + f"params_file:={shlex.quote(NAVIGATION_PARAMS_FILE)}"
     )
@@ -1578,11 +1664,12 @@ def save_pgm(request: PgmSaveRequest):
 @router.delete("/maps/pgm")
 def delete_pgm(path: str):
     """Delete a saved map: the .pgm plus its .yaml / annotations sidecars in
-    ai_worker, and every mission stored for the map on this side."""
+    ai_worker, and the missions and legacy spot directory stored for this map."""
     resolved = _resolve_pgm_path(path)
     code, _ = _exec(["test", "-f", str(resolved)])
     if code != 0:
         raise HTTPException(404, f"PGM file not found: {path}")
+    map_spots_directory_for_removal(resolved.stem)
     yaml_path = resolved.with_suffix(".yaml")
     annotations_path = _resolve_map_annotations_path(resolved)
     code, output = _exec(
@@ -1593,6 +1680,7 @@ def delete_pgm(path: str):
     return {
         "path": _relative_map_path(resolved),
         "removed_missions": remove_map_missions(resolved.stem),
+        "removed_spot_storage": remove_map_spots(resolved.stem),
         "deleted": True,
     }
 
