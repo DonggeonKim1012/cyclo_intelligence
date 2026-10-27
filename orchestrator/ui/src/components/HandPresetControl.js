@@ -30,7 +30,7 @@ export default function HandPresetControl({ enabled = true }) {
 
   const isOnline = Boolean(status) && now - status.receivedAt <= STATUS_STALE_AFTER_MS;
   // No SH5-only panel for other leader profiles or stale bridge instances.
-  if (!enabled || !isOnline || status.controlProfile !== 'lg2_mini_sh5_recording') return null;
+  if (!enabled || !isOnline || !['lg2_mini_sh5_recording', 'a3_sh5'].includes(status.controlProfile)) return null;
 
   const modal = isModalOpen && createPortal(
     <HandPresetDialog

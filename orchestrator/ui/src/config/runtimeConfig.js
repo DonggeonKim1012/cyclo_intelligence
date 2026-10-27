@@ -29,3 +29,9 @@ export const CYCLO_VIDEO_SERVER_PORT = getPort('videoServerPort', 7082);
 export const CYCLO_WEB_VIDEO_SERVER_PORT = getPort('webVideoServerPort', 7085);
 export const CYCLO_CAMERA_PREVIEW_PORT = getPort('cameraPreviewPort', 7086);
 export const CYCLO_SUPERVISOR_API_PORT = getPort('supervisorApiPort', 7100);
+// Opt in only where the follower has a priority mux; preserve existing deployments.
+export const CYCLO_MOBILE_TELEOP_TOPIC = (
+  typeof runtimeConfig.mobileTeleopTopic === 'string'
+  && /^\/[A-Za-z0-9_/]+$/.test(runtimeConfig.mobileTeleopTopic)
+) ? runtimeConfig.mobileTeleopTopic : '/cmd_vel';
+export const CYCLO_UPPER_BODY_PRIORITY = runtimeConfig.upperBodyTeleopPriority === true;
