@@ -230,3 +230,55 @@ docker image save -o "$DEPLOY_ROOT/evidence/cyclo-web.tar" "$WEB_IMAGE"
 워크스페이스와 사용자 데이터까지 함께 보관해야 동일 배포를 복구할 수 있다.
 runtime 이미지 아카이브에는 bind mount의 코드·프리셋·녹화 데이터가 포함되지 않는다.
 전체 환경변수/inspect에는 자격 증명이 포함될 수 있으므로 공개하지 않는다.
+
+### 2026-10-15 후속 검증: A3 SH5, C++ hand bridge, 실제 mapping
+
+위의 초기 `network=none` 절차로는 Ethernet LiDAR 지도 생성을 할 수 없다.
+현재 검증 호스트는 `iptable_raw` 모듈이 없어 Docker bridge 포트 게시도 실패하므로,
+운영자 승인 후 **host network + ROS domain 174 + 전용 loopback 포트**로 전환했다.
+기존 운영 컨테이너는 수정하지 않았다. 이 후속 배포가 현재 검증 컨테이너 기준이다.
+
+- 브라우저: `http://192.168.6.2:17080`, WebSocket 17090. 기존 7080 UI와 구분한다.
+- 전용 Zenoh: `127.0.0.1:17447`, multicast discovery/shared memory 사용 안 함.
+- Cyclo 내부 bind: `127.0.0.1`; API 17710, rosbridge 17790, replay 17782,
+  web-video 17785, camera-preview 17786. nginx/Unix relay의 외부 포트는 유지한다.
+- `CYCLO_BIND_ADDRESS`, `CYCLO_ROSBRIDGE_PORT`, `CYCLO_VIDEO_SERVER_PORT`,
+  `CYCLO_VIDEO_PUBLIC_PORT`, `CYCLO_WEB_VIDEO_SERVER_PORT`, `CYCLO_CAMERA_PREVIEW_PORT`
+  로 명시 설정한다. 미지정 시 기존 기본값을 유지한다.
+
+Start Mapping은 별도의 cyclo_manager ROS topic이 아니라
+`POST /api/navigation/start` → supervisor → AI Worker 제어 경로다.
+클린 Cyclo에는 Docker 소켓을 **명시 승인 후** 연결했다. 소켓은 대상 하나에
+한정된 권한이 아니라 호스트 Docker 전체 권한을 부여한다. 신뢰 네트워크에서만
+사용하고 인증 없는 UI/API를 인터넷에 노출하지 않는다.
+
+클린 AI에는 s6가 없으므로 다음 환경을 supervisor 프로세스에만 설정한다.
+기존 배포는 기본 `s6` backend를 그대로 사용한다.
+
+```bash
+export CYCLO_NAVIGATION_BACKEND=process
+export CYCLO_NAVIGATION_CONTAINER=ai_worker_full_real_20261015
+export CYCLO_NAVIGATION_ROS_SETUP=/full/runtime-env.sh
+export CYCLO_NAVIGATION_MAPS_DIR=/full/runtime-update/src/ai_worker/ffw_navigation/maps
+export CYCLO_NAVIGATION_PARAMS_FILE=/full/runtime-update/src/ai_worker/ffw_navigation/config/navigation.yaml
+```
+
+로컬 배포 설정은 [docker/sh5-interop](docker/sh5-interop)에 보관했다. 이 파일들은
+`/home/robotis/interop-clean-20261015-YMDUC0` 경로의 검증 호스트용이며 다른 호스트에
+그대로 실행하지 않는다. `ce` → `cyclo_intelligence`, `ad` → follower/A3 명령을
+별도 터미널에서 실행한다. AI 쪽 `launch_lidar:=true`와 UDP 2368/2369가 필요하다.
+실제 `/scan`과 0.05 m 해상도 247×114 `/map`, start/status/stop API, 다른 PC용
+주소의 HTTP 200/WebSocket 관절 수신까지 확인했다. 새 주행 목표는 보내지 않았다.
+
+Hand Preset Studio는 `lg2_mini_sh5_recording`과 `a3_sh5` profile만 표시한다.
+SH5 녹화 action은 변환된 팔 7+7, 손 모터 20+20 토픽을 기록하며 원본 A3 8차원
+diagnostic topic은 기록 목록에 없다. 손 action은 보간된 목표값, observation은
+follower `/joint_states`의 실제 측정값이다. head 2/lift 1/mobile 3까지 기본 60차원이며
+관절 이름으로 추출하므로 그리퍼를 여덟 번째 팔 관절로 저장하지 않는다.
+모의 ROS 도메인에서 C++ 출력 → MCAP 저장 → 재읽기로 7/20차원과 이름을 확인했다.
+실로봇 teleop은 활성화하지 않아, 이번 검사에 실제 움직이는 손의 녹화/지연 검증은 포함되지 않는다.
+
+후속 ROS 패키지(`orchestrator`, `cyclo_data`)와 UI production build는 완료했다.
+기존 독립 clean underlay에서 필요한 패키지를 재빌드했으며 전체 의존성 이미지를
+다시 처음부터 빌드한 것은 아니다. 코드와 ROS install/UI 산출물은 여전히 호스트
+`/validation:ro` bind mount에 있으며, 이미지 snapshot만으로 이 내용을 복구할 수 없다.
