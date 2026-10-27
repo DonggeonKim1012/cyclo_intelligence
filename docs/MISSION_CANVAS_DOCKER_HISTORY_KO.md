@@ -57,3 +57,14 @@
 - 최종 트리: 실행 소스·설정·기존 문서 등 1,470개 + 기존 gitlink 3개 + 이 복구 문서 1개.
 - 기존 순수 로직 테스트: test_collection_episode_contract.py, test_collection_review_counts.py, test_execution_state.py — 33 passed.
 - 테스트에는 로봇 동작·컨테이너 재시작·UI 전체 빌드·하위 저장소 빌드 검증이 포함되지 않는다.
+
+## 2026-10-27 — AD 최신 실행 소스 동기화 및 CE 재확인
+
+- AD 기준 이력: DonggeonKim1012/ai_worker의 lg2-recording-controls-20261014, `14bc0a0ee96948c1e4f32b47dff40747fdd235a3`.
+- AD 복구 커밋: `7a097d1157ca9073d9dd88abf74c30bad039f8a9`, 호스트 `/home/robotis/ce-ad-code-20261019/ai_worker`, `recovery/ad-runtime-20261027`.
+- AD 기존 호스트 소스는 `backup/host-before-ad-sync-20261027`의 `2212bd60191f5a9fb7de1ab03967e82e254b61cd`로 보존했다. 기존 폴더에는 Git 메타데이터가 없어 새 저장소에 지정된 upstream 이력을 fetch했다.
+- AD 확인된 차이: 설치된 rs_serial.yaml, Task_000802.yaml, lidar_dual.launch.py, SH5 follower ros2_control.xacro 4개의 실행 설정이 src와 달라 설치 버전을 소스 경로에 반영했다. Python 설치 코드 18개는 src와 내용이 같았다.
+- AD 검증: 소스·설정 649개 복사 내용/실행 모드 확인, Python 74개 문법 검사 통과. 호스트 전용 테스트 2개는 실행 소스에 섞지 않고 보존 브랜치에 남겼다.
+- CE 재검증: src에 설치된 Python 내용 변경 9개를 반영한 1,470개 파일이 복구 브랜치와 일치했다. visualize_rosbag.py는 src와 install의 실행 비트만 다르며 내용이 같아 기존 src 모드를 유지했다.
+- CE 기존 작업 브랜치 work/merge-feature-demo-prep의 미커밋 상태는 유지한다. 이번 CE 변경은 복구 브랜치의 이 문서뿐이다.
+- 컨테이너 적용 여부: 실행 중인 AD/CE 파일 수정, 재빌드, 재시작, 로봇 실행 및 원격 push 없음. C++ 산출물의 재빌드 일치성은 이번 소스 동기화로 검증하지 않았다.
