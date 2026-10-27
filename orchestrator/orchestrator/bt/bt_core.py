@@ -66,3 +66,6 @@ class BTNode:
     def log_error(self, message: str):
         """Log an error message with the node name prefix."""
         self.node.get_logger().error(f'[{self.name}] {message}')
+        reporter = getattr(self.node, 'record_execution_error', None)
+        if callable(reporter):
+            reporter(self.name, message)

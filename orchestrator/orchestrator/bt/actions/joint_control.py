@@ -36,8 +36,10 @@ from typing import Optional
 from typing import TYPE_CHECKING
 
 from orchestrator.bt.actions.base_action import BaseAction
+from orchestrator.bt.actions.motion_pause import JointPause
 from orchestrator.bt.bt_core import NodeStatus
 from orchestrator.bt.constants import *  # noqa: F403
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.qos import QoSProfile
 from rclpy.qos import ReliabilityPolicy
 from sensor_msgs.msg import JointState
@@ -50,6 +52,7 @@ if TYPE_CHECKING:
 
 JOINT_STATE_TYPE = 'sensor_msgs/msg/JointState'
 JOINT_TRAJECTORY_TYPE = 'trajectory_msgs/msg/JointTrajectory'
+HAND_POSITION_THRESHOLD_RAD = 0.05
 
 
 def _as_bool(value) -> bool:
@@ -121,7 +124,7 @@ def _timeout_for_group(group: str) -> int:
     return MOVE_ARMS_TIMEOUT_TICKS  # noqa: F405
 
 
-class JointControl(BaseAction):
+class JointControl(JointPause, BaseAction):
     """Publish JointTrajectory commands and wait for configured state feedback."""
 
     @classmethod
@@ -137,11 +140,13 @@ class JointControl(BaseAction):
         else:
             enable_head = _as_bool(params.get('enable_head', False))
             enable_arms = _as_bool(params.get('enable_arms', False))
+            enable_hands = _as_bool(params.get('enable_hands', False))
             enable_lift = _as_bool(params.get('enable_lift', False))
 
             kwargs.update({
                 'enable_head': enable_head,
                 'enable_arms': enable_arms,
+                'enable_hands': enable_hands,
                 'enable_lift': enable_lift,
             })
 
@@ -150,12 +155,11 @@ class JointControl(BaseAction):
                     'head_positions', [0.0, 0.0],
                 )
             if enable_arms:
-                default_positions = [0.0] * 8
                 kwargs['left_positions'] = params.get(
-                    'left_positions', default_positions,
+                    'left_positions', None,
                 )
                 kwargs['right_positions'] = params.get(
-                    'right_positions', default_positions,
+                    'right_positions', None,
                 )
                 # Optional per-joint selection (BT Manager joint chips):
                 # when present, the trajectory commands only these joints
@@ -170,6 +174,9 @@ class JointControl(BaseAction):
                     kwargs['right_joint_names'] = _parse_groups(
                         right_joint_names,
                     )
+            if enable_hands:
+                kwargs['left_hand_positions'] = params.get('left_hand_positions')
+                kwargs['right_hand_positions'] = params.get('right_hand_positions')
             if enable_lift:
                 kwargs['lift_position'] = params.get('lift_position', 0.0)
 
@@ -189,7 +196,7 @@ class JointControl(BaseAction):
         node: 'Node',
         groups: str = '',
         positions: str = '',
-        enable_head: bool = True,
+        enable_head: bool = False,
         head_positions='0.0, 0.0',
         head_joint_names: Optional[list[str]] = None,
         enable_arms: bool = False,
@@ -199,6 +206,9 @@ class JointControl(BaseAction):
         left_positions: Optional[list[float]] = None,
         right_joint_names: Optional[list[str]] = None,
         right_positions: Optional[list[float]] = None,
+        enable_hands: bool = False,
+        left_hand_positions: Optional[list[float]] = None,
+        right_hand_positions: Optional[list[float]] = None,
         enable_lift: bool = False,
         lift_position: float = 0.0,
         lift_joint_name: Optional[str] = None,
@@ -206,9 +216,11 @@ class JointControl(BaseAction):
         position_threshold: float = POSITION_THRESHOLD_RAD,  # noqa: F405
         topic_config: Optional[dict] = None,
     ):
+        if enable_hands and (not _has_value(left_hand_positions) or not _has_value(right_hand_positions)):
+            raise ValueError('JointControl: both hand positions are required when enable_hands is true')
         super().__init__(node, name='JointControl')
 
-        self.position_threshold = position_threshold
+        self.position_threshold = float(position_threshold)
         self.topic_config = topic_config or {}
         self._missing_joint_names = set()
 
@@ -235,6 +247,9 @@ class JointControl(BaseAction):
                 right_positions=right_positions,
                 left_joint_names=left_joint_names,
                 right_joint_names=right_joint_names,
+                enable_hands=enable_hands,
+                left_hand_positions=left_hand_positions,
+                right_hand_positions=right_hand_positions,
                 enable_lift=enable_lift,
                 lift_position=lift_position,
                 lift_joint_name=lift_joint_name,
@@ -244,7 +259,7 @@ class JointControl(BaseAction):
         if not self._channels:
             raise ValueError(
                 'JointControl: set groups or enable at least one legacy '
-                'group (enable_head, enable_arms, enable_lift).'
+                'group (enable_head, enable_arms, enable_hands, enable_lift).'
             )
 
         if duration is not None:
@@ -261,7 +276,11 @@ class JointControl(BaseAction):
 
         self._joint_state_topics = self._configured_joint_state_topics()
         self._joint_states = self._empty_joint_states()
+        self._joint_received = {}
+        self._joint_previous_position = {}
+        self._joint_velocities = {}
         self.joint_state_subscriptions = []
+        self._feedback_group = ReentrantCallbackGroup()
         for topic in self._joint_state_topics:
             sub = self.node.create_subscription(
                 JointState,
@@ -270,6 +289,7 @@ class JointControl(BaseAction):
                     topic_name, msg
                 ),
                 qos_profile,
+                callback_group=self._feedback_group,
             )
             self.joint_state_subscriptions.append(sub)
 
@@ -281,8 +301,11 @@ class JointControl(BaseAction):
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._paused = threading.Event()
+        self._motion_lock = threading.RLock()
         self._thread = None
         self._result = None
+        self._failure_reason = ''
         self._control_rate = CONTROL_RATE_HZ  # noqa: F405
 
     # -- Construction helpers ------------------------------------------------
@@ -323,6 +346,9 @@ class JointControl(BaseAction):
         right_positions,
         left_joint_names,
         right_joint_names,
+        enable_hands,
+        left_hand_positions,
+        right_hand_positions,
         enable_lift,
         lift_position,
         lift_joint_name,
@@ -352,6 +378,19 @@ class JointControl(BaseAction):
                 default_positions=[0.0] * 8,
                 qos_profile=qos_profile,
             ))
+
+        if enable_hands:
+            for group, positions in (
+                ('hand_left', left_hand_positions),
+                ('hand_right', right_hand_positions),
+            ):
+                self._channels.append(self._make_channel(
+                    group=group,
+                    joint_names=None,
+                    positions=positions,
+                    default_positions=None,
+                    qos_profile=qos_profile,
+                ))
 
         if enable_lift:
             lift_joints = [lift_joint_name] if lift_joint_name else None
@@ -408,14 +447,33 @@ class JointControl(BaseAction):
                 f'expected {JOINT_TRAJECTORY_TYPE}'
             )
 
-        resolved_joint_names = list(
-            joint_names
-            or self.topic_config.get('joint_order', {}).get(group_key, [])
-        )
+        configured_joint_names = self.topic_config.get('joint_order', {}).get(group_key, [])
+        resolved_joint_names = list(joint_names or configured_joint_names)
         if not resolved_joint_names:
             raise ValueError(
                 f"JointControl: no joint names configured for '{group_key}'"
             )
+        if joint_names and configured_joint_names:
+            unsupported = set(resolved_joint_names) - set(configured_joint_names)
+            side = 'l' if group == 'arm_left' else 'r' if group == 'arm_right' else None
+            legacy_gripper = f'gripper_{side}_joint1' if side else None
+            if (legacy_gripper and unsupported == {legacy_gripper}
+                    and len(resolved_joint_names) == len(configured_joint_names) + 1
+                    and set(resolved_joint_names) == set(configured_joint_names) | {legacy_gripper}):
+                gripper_index = resolved_joint_names.index(legacy_gripper)
+                if _has_value(positions):
+                    old_positions = _coerce_positions(positions) or []
+                    if len(old_positions) == len(resolved_joint_names):
+                        positions = [value for index, value in enumerate(old_positions)
+                                     if index != gripper_index]
+                resolved_joint_names.pop(gripper_index)
+                self.log_warn(f'JointControl: ignored legacy {legacy_gripper} in {group}')
+                unsupported = set()
+            if unsupported:
+                raise ValueError(
+                    f"JointControl: group '{group}' has joints outside its controller: "
+                    + ', '.join(sorted(unsupported))
+                )
 
         if _has_value(positions):
             target_positions = _coerce_positions(positions) or []
@@ -473,15 +531,29 @@ class JointControl(BaseAction):
     def _joint_state_callback(self, topic_name, msg):
         if topic_name in self._joint_states:
             self._joint_states[topic_name] = msg
+            received = time.monotonic()
+            for i, name in enumerate(msg.name):
+                if i < len(msg.position):
+                    previous_time = self._joint_received.get(name, received)
+                    previous_position = self._joint_previous_position.get(name, msg.position[i])
+                    dt = received - previous_time
+                    estimate = ((msg.position[i] - previous_position) / dt
+                                if dt > 0 else float('inf'))
+                    self._joint_received[name] = received
+                    self._joint_previous_position[name] = msg.position[i]
+                    self._joint_velocities[name] = msg.velocity[i] if i < len(msg.velocity) else estimate
 
     # -- Control loop ---------------------------------------------------------
 
-    def _publish_channel(self, channel):
+    def _publish_channel(self, channel, positions=None, duration=None):
         traj = JointTrajectory()
         traj.joint_names = list(channel['joint_names'])
         point = JointTrajectoryPoint()
-        point.positions = list(channel['positions'])
-        point.time_from_start.sec = int(self.duration)
+        point.positions = ([positions[n] for n in channel['joint_names']]
+                           if positions is not None else list(channel['positions']))
+        seconds = self.duration if duration is None else duration
+        point.time_from_start.sec = int(seconds)
+        point.time_from_start.nanosec = int((seconds - int(seconds)) * 1e9)
         traj.points.append(point)
         channel['pub'].publish(traj)
 
@@ -496,6 +568,7 @@ class JointControl(BaseAction):
         return result
 
     def _channel_reached(self, channel, name_to_position) -> bool:
+        threshold = self._position_threshold_for(channel)
         for jname, target in zip(channel['joint_names'], channel['positions']):
             if jname not in name_to_position:
                 if jname not in self._missing_joint_names:
@@ -505,15 +578,47 @@ class JointControl(BaseAction):
                         'JointState feedback topics'
                     )
                 return False
-            if abs(name_to_position[jname] - target) > self.position_threshold:
+            if abs(name_to_position[jname] - target) > threshold:
                 return False
         return True
+
+    def _position_threshold_for(self, channel) -> float:
+        if channel['group'] in ('hand_left', 'hand_right'):
+            return max(self.position_threshold, HAND_POSITION_THRESHOLD_RAD)
+        return self.position_threshold
+
+    def _timeout_detail(self, groups: str) -> str:
+        positions = self._name_to_position()
+        if not positions:
+            return f'JointControl timeout: no JointState feedback [{groups}]'
+        missing = []
+        outside = []
+        for channel in self._channels:
+            threshold = self._position_threshold_for(channel)
+            for name, target in zip(channel['joint_names'], channel['positions']):
+                if name not in positions:
+                    missing.append(name)
+                else:
+                    delta = abs(positions[name] - target)
+                    if delta > threshold:
+                        outside.append((delta, name, threshold))
+        details = []
+        if missing:
+            details.append('missing feedback: ' + ', '.join(missing[:5]))
+        if outside:
+            details.append('outside tolerance: ' + ', '.join(
+                f'{name} {delta:.3f} rad (limit {threshold:.3f})'
+                for delta, name, threshold in sorted(outside, reverse=True)[:5]
+            ))
+        return f'JointControl timeout [{groups}]: ' + ('; '.join(details) or 'target not reached')
 
     def _control_loop(self):
         rate_sleep = RATE_SLEEP_SEC  # noqa: F405
 
-        for ch in self._channels:
-            self._publish_channel(ch)
+        with self._motion_lock:
+            if not self._paused.is_set() and not self._stop_event.is_set():
+                for ch in self._channels:
+                    self._publish_channel(ch)
         groups = ', '.join(ch['group'] for ch in self._channels)
         self.log_info(f'JointControl trajectory published [{groups}]')
 
@@ -522,6 +627,9 @@ class JointControl(BaseAction):
             not self._stop_event.is_set()
             and timeout_count < self._timeout_ticks
         ):
+            if self._paused.is_set():
+                time.sleep(rate_sleep)
+                continue
             if not any(msg is not None for msg in self._joint_states.values()):
                 time.sleep(rate_sleep)
                 timeout_count += 1
@@ -542,11 +650,11 @@ class JointControl(BaseAction):
             time.sleep(rate_sleep)
             timeout_count += 1
 
+        failure_reason = self._timeout_detail(groups)
         with self._lock:
+            self._failure_reason = failure_reason
             self._result = False
-        self.log_error(
-            f'JointControl timeout waiting for target positions [{groups}]'
-        )
+        self.log_warn(failure_reason)
 
     # -- BT plumbing ----------------------------------------------------------
 
@@ -555,8 +663,10 @@ class JointControl(BaseAction):
             self._joint_states = self._empty_joint_states()
             self._missing_joint_names = set()
             self._stop_event.clear()
+            self._paused.clear()
             with self._lock:
                 self._result = None
+                self._failure_reason = ''
             self._thread = threading.Thread(
                 target=self._control_loop, daemon=True,
             )
@@ -567,16 +677,30 @@ class JointControl(BaseAction):
 
         with self._lock:
             result = self._result
+            failure_reason = self._failure_reason
         if result is None:
             return NodeStatus.RUNNING
-        return NodeStatus.SUCCESS if result else NodeStatus.FAILURE
+        if not result:
+            self.log_error(failure_reason)
+            return NodeStatus.FAILURE
+        return NodeStatus.SUCCESS
 
     def reset(self):
         super().reset()
+        # Stop/reset must replace any still executing topic trajectory too.
+        hold_error = None
+        if self._thread is not None and self._result is None:
+            try:
+                self.pause()
+            except Exception as exc:
+                hold_error = exc
         self._stop_event.set()
+        self._paused.clear()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=THREAD_JOIN_TIMEOUT_SEC)  # noqa: F405
         self._thread = None
         with self._lock:
             self._result = None
         self._joint_states = self._empty_joint_states()
+        if hold_error is not None:
+            raise RuntimeError(str(hold_error))
