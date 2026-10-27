@@ -14,8 +14,8 @@
 //
 // Author: Seongwoo Kim
 
-import { MISSION_TEXT, MISSION_TEXT_MUTED } from "../../lib/theme";
-import { Panel, SessionRow } from "../primitives";
+import { MISSION_TEXT, MISSION_TEXT_MUTED } from "../../../mapWorkspace/lib/theme";
+import { Panel, SessionRow } from "../../../mapWorkspace/components/primitives";
 
 export const RUNNER_PHASE_LABEL = {
   "nav-sent": "Navigating",
@@ -44,6 +44,7 @@ export default function RunSessionPanel({
   missionNames,
   missionSelectDisabled,
   onMissionChange,
+  taskParameters,
 }) {
   // Runner progress intentionally survives a cancellation internally so it can
   // describe the last outcome. Once the loaded Run snapshot is cleared,
@@ -74,6 +75,7 @@ export default function RunSessionPanel({
           {missionNames.map((name) => <option key={name} value={name}>{name}</option>)}
         </select>
       </label>
+      {taskParameters && <div className="flex justify-end">{taskParameters}</div>}
       {running && (
         <div className="flex items-center justify-between gap-2 text-xs min-w-0">
           <span style={{ color: MISSION_TEXT_MUTED }}>Localization</span>

@@ -1,5 +1,18 @@
 // Copyright 2026 ROBOTIS CO., LTD.
-// Licensed under the Apache License, Version 2.0.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Author: Seongwoo Kim
 
 import { useCallback, useRef } from "react";
 import persistDesignMission from "../lib/persistDesignMission";
@@ -107,6 +120,7 @@ export default function useDesignMissionSaveController({
         targetMissionName: target,
         targetKnown: snapshot.catalog?.mapName === snapshot.identity.mapName
           && (snapshot.catalog?.names || []).includes(target),
+        metadata: snapshot.content?.metadata || {},
         visibleSpots: snapshot.content?.visibleSpots || [],
         behaviorNodes: snapshot.content?.behaviorNodes || [],
         missionFlowNodes: snapshot.content?.missionFlowNodes || [],
@@ -134,6 +148,7 @@ export default function useDesignMissionSaveController({
         ports.history.rebase(saveOutput.savedHistorySnapshot);
       } else {
         ports.history.reset();
+        ports.content.onSaveCompleted?.();
       }
       ports.catalog.record(snapshot.identity.mapName, target);
       try {

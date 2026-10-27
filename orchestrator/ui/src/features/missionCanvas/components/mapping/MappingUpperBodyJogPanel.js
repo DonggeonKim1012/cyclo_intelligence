@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useNavigationRosTopic } from "../../../../hooks/useNavigationRosTopic";
-import { MISSION_TEXT_MUTED } from "../../lib/theme";
-import { ActionButton, Panel, SessionRow } from "../primitives";
+import { CYCLO_UPPER_BODY_PRIORITY } from "../../../../config/runtimeConfig";
+import { MISSION_TEXT_MUTED } from "../../../mapWorkspace/lib/theme";
+import { ActionButton, Panel, SessionRow } from "../../../mapWorkspace/components/primitives";
 import {
   TELEOP_MESSAGE_TYPE,
   TELEOP_STOP,
   TELEOP_TOPIC,
   teleopTwist,
-} from "./MappingTeleopPanel";
+} from "../../../mapWorkspace/components/MappingTeleopPanel";
 
 export const UPPER_BODY_MESSAGE_TYPE = "trajectory_msgs/msg/JointTrajectory";
-export const HEAD_COMMAND_TOPIC = "/leader/joystick_controller_left/joint_trajectory";
-export const LIFT_COMMAND_TOPIC = "/leader/joystick_controller_right/joint_trajectory";
+export const HEAD_COMMAND_TOPIC = CYCLO_UPPER_BODY_PRIORITY
+  ? "/cyclo/upper_body/head/joint_trajectory" : "/leader/joystick_controller_left/joint_trajectory";
+export const LIFT_COMMAND_TOPIC = CYCLO_UPPER_BODY_PRIORITY
+  ? "/cyclo/upper_body/lift/joint_trajectory" : "/leader/joystick_controller_right/joint_trajectory";
 
 export const AI_WORKER_CONTROLLER_LIMITS = {
   head_joint1: { lower: -0.2267, upper: 0.6901 },
@@ -28,10 +31,35 @@ const LIFT_DURATION_SECONDS = 0.8;
 const COMMAND_TIMEOUT_MS = 3000;
 const HEAD_TOLERANCE = 0.015;
 const LIFT_TOLERANCE = 0.008;
+// SH5 head pitch DXL 61 uses 2048 as zero and allows raw positions 1896..2560.
+// A small inward jog from beyond that range can still be rejected by the motor.
+const HEAD_PITCH_MOTOR_LOWER = (1896 - 2048) * (2 * Math.PI / 4096);
+const HEAD_PITCH_MOTOR_UPPER = (2560 - 2048) * (2 * Math.PI / 4096);
+const HEAD_PITCH_RECOVERY_MARGIN = 0.01;
+const HEAD_PITCH_MAX_RECOVERY_STEP = 0.115; // Below the mux's 0.116 rad bound.
 const NOOP = () => {};
 
 function clamp(value, lower, upper) {
   return Math.min(Math.max(value, lower), upper);
+}
+
+export function jogWithinLimits(position, delta, { lower, upper }) {
+  if (!Number.isFinite(position)) return NaN;
+  if (delta === 0) return position;
+  if (position > upper) return delta < 0 ? Math.max(position + delta, upper) : position;
+  if (position < lower) return delta > 0 ? Math.min(position + delta, lower) : position;
+  return clamp(position + delta, lower, upper);
+}
+
+export function headPitchJogTarget(position, delta, limits) {
+  const target = jogWithinLimits(position, delta, limits);
+  let safeTarget = target;
+  if (position > HEAD_PITCH_MOTOR_UPPER && delta < 0) {
+    safeTarget = Math.min(target, HEAD_PITCH_MOTOR_UPPER - HEAD_PITCH_RECOVERY_MARGIN);
+  } else if (position < HEAD_PITCH_MOTOR_LOWER && delta > 0) {
+    safeTarget = Math.max(target, HEAD_PITCH_MOTOR_LOWER + HEAD_PITCH_RECOVERY_MARGIN);
+  }
+  return Math.abs(safeTarget - position) <= HEAD_PITCH_MAX_RECOVERY_STEP ? safeTarget : NaN;
 }
 
 function duration(seconds) {
@@ -318,27 +346,26 @@ export default function MappingUpperBodyJogPanel({
   ]);
 
   const jogHead = (pitchDelta, yawDelta) => {
+    const pitchTarget = headPitchJogTarget(pose.head_joint1, pitchDelta, limits.head_joint1);
+    if (!Number.isFinite(pitchTarget)) {
+      const message = "Head pitch is too far outside the motor range for a safe UI recovery step.";
+      setErrorMessage(message);
+      onMessage(message);
+      return;
+    }
     publishTarget(
       "Head",
       HEAD_COMMAND_TOPIC,
       HEAD_JOINTS,
       [
-        clamp(pose.head_joint1 + pitchDelta, limits.head_joint1.lower, limits.head_joint1.upper),
-        clamp(pose.head_joint2 + yawDelta, limits.head_joint2.lower, limits.head_joint2.upper),
+        pitchTarget,
+        jogWithinLimits(pose.head_joint2, yawDelta, limits.head_joint2),
       ],
       HEAD_DURATION_SECONDS,
     );
   };
 
-  const centerYaw = () => {
-    publishTarget(
-      "Head",
-      HEAD_COMMAND_TOPIC,
-      HEAD_JOINTS,
-      [pose.head_joint1, clamp(0, limits.head_joint2.lower, limits.head_joint2.upper)],
-      HEAD_DURATION_SECONDS,
-    );
-  };
+  const centerYaw = () => jogHead(0, clamp(-pose.head_joint2, -0.3, 0.3));
 
   const jogLift = (delta) => {
     publishTarget(
@@ -422,7 +449,7 @@ export default function MappingUpperBodyJogPanel({
             <ActionButton disabled={headDisabled} onClick={() => jogHead(-headStep, 0)} variant="secondary">
               Look Up
             </ActionButton>
-            <ActionButton disabled={headDisabled} onClick={() => jogHead(headStep, 0)} variant="secondary">
+            <ActionButton disabled={headDisabled || pose.head_joint1 >= limits.head_joint1.upper} onClick={() => jogHead(headStep, 0)} variant="secondary">
               Look Down
             </ActionButton>
           </div>
@@ -481,6 +508,11 @@ export default function MappingUpperBodyJogPanel({
           Limits: {limitSource}. Base motion is stopped and locked while a command is active.
           Keep leader head/lift input idle while using this panel.
         </div>
+        {pose.head_joint1 > HEAD_PITCH_MOTOR_UPPER && (
+          <div className="text-[11px] leading-4" style={{ color: "var(--mc-danger)" }}>
+            Head pitch is beyond the motor limit. Use Look Up to recover inward before other pitch moves.
+          </div>
+        )}
       </div>
     </Panel>
   );
