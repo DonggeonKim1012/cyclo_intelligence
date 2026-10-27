@@ -30,10 +30,12 @@ Session-state boundary (REVIEW §9.3):
   flags before invoking us and after our response returns.
 """
 
+import json
 import shutil
 import threading
 from pathlib import Path
 from typing import Optional
+import yaml
 
 from cyclo_data.recorder.camera_info_snapshot import CameraInfoSnapshot
 from cyclo_data.recorder.camera_selection import CameraSelection
@@ -100,13 +102,10 @@ class RecordingService:
         self._last_camera_rotations: dict = {}
         self._camera_selection = CameraSelection()
         self._video_camera_selection = None
-        # rosbag_recorder's `prepare` always destroys + recreates its
-        # subscriptions (service_bag_recorder.cpp:188-192), which resets
-        # the topic monitor's EMA baseline and triggers a fresh wave of
-        # zenoh liveliness declarations. We skip forwarding prepare when
-        # the topic set hasn't changed since the last call so START
-        # doesn't reissue what REFRESH_TOPICS already did.
+        # Reuse preparation only for the same topics AND recorder process.
+        # The monitor publisher GID changes when rosbag_recorder restarts.
         self._last_prepared_topics: tuple = ()
+        self._prepared_recorder_identity: tuple = ()
         # Background transcoder converts each episode's raw MJPEG MP4s
         # into H.264 after STOP. One pool per service instance, lazily
         # initialised on first STOP so process startup stays cheap.
@@ -146,6 +145,10 @@ class RecordingService:
         self._camera_server = node.create_service(
             RecordingCameras, '/data/recording/cameras',
             self._camera_configuration_callback,
+            callback_group=node.state_callback_group,
+        )
+        self._recorder_recovery_timer = node.create_timer(
+            2.0, self._recover_recorder_topics,
             callback_group=node.state_callback_group,
         )
         node.get_logger().info(f'Service advertised: {self.SERVICE_NAME}')
@@ -210,6 +213,7 @@ class RecordingService:
     # ------------------------------------------------------------------
 
     def shutdown(self) -> None:
+        self._recorder_recovery_timer.cancel()
         if self._status_timer is not None:
             try:
                 self._status_timer.cancel()
@@ -500,6 +504,10 @@ class RecordingService:
     # ------------------------------------------------------------------
 
     def _do_refresh_topics(self, request, response):
+        if self._camera_configuration_locked():
+            response.success = False
+            response.message = 'Stop recording and wait for saving before refreshing topics'
+            return response
         topics = list(request.topics or [])
         if not topics:
             response.success = False
@@ -509,7 +517,7 @@ class RecordingService:
             response.success = False
             response.message = 'rosbag_recorder service unavailable'
             return response
-        self._prepare_rosbag_topics(topics)
+        self._prepare_rosbag_topics(topics, force=True)
 
         # When the orchestrator forwards REFRESH_TOPICS from
         # set_robot_type_callback, it carries the freshly-selected
@@ -531,21 +539,46 @@ class RecordingService:
         response.message = f'Topics refreshed ({len(topics)} topics)'
         return response
 
-    def _prepare_rosbag_topics(self, topics: list) -> None:
-        """Forward `prepare` to rosbag_recorder only when the set changes.
+    def _recorder_identity(self) -> tuple:
+        return tuple(sorted(
+            bytes(info.endpoint_gid)
+            for info in self._node.get_publishers_info_by_topic('/rosbag_recorder/monitor')
+            if info.node_name == 'service_bag_recorder'
+        ))
 
-        rosbag_recorder rebuilds its subscriptions on every prepare
-        (service_bag_recorder.cpp:188-192) — that resets the topic
-        monitor's EMA baseline and fires a fresh zenoh liveliness
-        declaration wave. Caching by sorted-tuple lets the no-op case
-        (REFRESH_TOPICS already prepared this set, and START hands us
-        the same one) skip the round-trip entirely.
-        """
-        new_set = tuple(sorted(topics))
-        if new_set == self._last_prepared_topics:
+    def _prepare_rosbag_topics(self, topics: list, *, force=False) -> None:
+        """Cache only acknowledged preparation for the current recorder."""
+        new_set = tuple(sorted(set(topics)))
+        identity = self._recorder_identity()
+        if len(identity) != 1:
+            self._prepared_recorder_identity = ()
+            raise RuntimeError('Expected one rosbag_recorder monitor publisher')
+        if (not force and new_set == self._last_prepared_topics
+                and identity == self._prepared_recorder_identity):
             return
+        # A failed/uncertain PREPARE must remain retryable, even for the
+        # same topic set and process (including a forced UI refresh).
+        self._prepared_recorder_identity = ()
         self._rosbag.prepare_rosbag(topics=topics)
+        if self._recorder_identity() != identity:
+            raise RuntimeError('rosbag_recorder changed during PREPARE; retry')
         self._last_prepared_topics = new_set
+        self._prepared_recorder_identity = identity
+
+    def _recover_recorder_topics(self) -> None:
+        # Serialized with recording commands. Never rebuild subscriptions
+        # during recording, review, saving, or episode archive work.
+        if not self._last_prepared_topics or self._camera_configuration_locked():
+            return
+        try:
+            identity = self._recorder_identity()
+            if (len(identity) != 1 or identity == self._prepared_recorder_identity
+                    or not self._rosbag.is_available()):
+                return
+            self._prepare_rosbag_topics(list(self._last_prepared_topics))
+            self._node.get_logger().info('Restored rosbag topic monitor after recorder restart')
+        except Exception as exc:  # Retry on the next idle recovery tick.
+            self._node.get_logger().warning(f'Rosbag topic monitor recovery pending: {exc}')
 
     def _ensure_video_pipeline(self, robot_type: str) -> None:
         """Build or reconfigure the persistent video/camera_info subscriptions.
@@ -650,11 +683,11 @@ class RecordingService:
 
         # rosbag_recorder is normally prepared at REFRESH_TOPICS time
         # (= robot_type selection) — _prepare_rosbag_topics short-circuits
-        # when the topic set hasn't changed, so this call is a no-op in
-        # the common case. If REFRESH_TOPICS never ran (tests, recovery)
+        # when the topic set and recorder process haven't changed.
+        # If REFRESH_TOPICS never ran (tests, recovery)
         # and request.topics is empty, warn so the caller knows the bag
         # will be empty.
-        topics = list(request.topics or [])
+        topics = list(request.topics or self._last_prepared_topics)
         if topics:
             self._prepare_rosbag_topics(topics)
         elif not self._last_prepared_topics:
@@ -894,6 +927,7 @@ class RecordingService:
 
         episode_dir = Path(self._data_manager.get_save_rosbag_path() or '')
         self._rosbag.stop_rosbag()
+        missing_topics = self._audit_recorded_topics(episode_dir)
         self._stop_episode_writers()
 
         self._data_manager.save_robotis_metadata(
@@ -930,10 +964,16 @@ class RecordingService:
             self._start_finish_episode_thread(self._data_manager)
         self._rosbag.publish_action_event(event)
 
-        self._publish_umbrella_status(
-            DataOperationStatus.COMPLETED, command_name,
-            f'{command_name} saved — '
-            f'next_episode={self._data_manager._record_episode_count}')
+        if missing_topics:
+            warning = f'INVALID episode: zero messages for {", ".join(missing_topics)}'
+            self._node.get_logger().error(warning)
+            self._publish_umbrella_status(
+                DataOperationStatus.FAILED, command_name, warning)
+        else:
+            self._publish_umbrella_status(
+                DataOperationStatus.COMPLETED, command_name,
+                f'{command_name} saved — '
+                f'next_episode={self._data_manager._record_episode_count}')
 
         response.success = True
         response.message = {
@@ -942,7 +982,34 @@ class RecordingService:
             'MOVE_TO_NEXT': 'Episode saved',
             'STOP_SEGMENT': 'Subtask saved',
         }.get(command_name, f'{command_name} completed')
+        if missing_topics:
+            response.message += f' — INVALID: zero messages for {", ".join(missing_topics)}'
         return response
+
+    def _audit_recorded_topics(self, episode_dir: Path) -> list[str]:
+        """Keep a durable warning when a source vanishes after START."""
+        expected = self._last_prepared_topics
+        if not expected:
+            return ['<no topics prepared>']
+        try:
+            bag = yaml.safe_load((episode_dir / 'metadata.yaml').read_text())
+            entries = bag['rosbag2_bagfile_information']['topics_with_message_count']
+            counts = {entry['topic_metadata']['name']: entry['message_count']
+                      for entry in entries}
+            missing = [topic for topic in expected if counts.get(topic, 0) == 0]
+        except Exception as exc:
+            missing = [f'<metadata unavailable: {exc}>']
+        audit_path = episode_dir / 'recording_topic_audit.json'
+        if episode_dir.parent.name == 'segments':
+            # FINISH_EPISODE removes the segment directory after archiving.
+            audit_path = (episode_dir.parent.parent /
+                          f'recording_topic_audit_segment_{episode_dir.name}.json')
+        try:
+            audit_path.write_text(json.dumps(
+                {'valid': not missing, 'missing_topics': missing}, indent=2))
+        except OSError as exc:
+            self._node.get_logger().error(f'Could not save topic audit: {exc}')
+        return missing
 
     def _do_discard_saved_segment(self, request, response):
         if self._data_manager is None:

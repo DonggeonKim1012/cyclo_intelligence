@@ -23,6 +23,7 @@
 #include <vector>
 #include <sstream>
 #include <filesystem>
+#include <thread>
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/generic_subscription.hpp"
@@ -313,18 +314,44 @@ void ServiceBagRecorder::handle_start(const std::string & uri)
       }
     }
 
-    // Topics still missing from the graph are omitted from this bag. The live
-    // monitor remains seeded with the full requested list, so the UI can keep
-    // warning about silent/missing topics without blocking acquisition.
+    // A partial bag cannot be converted safely. Require every requested
+    // topic to have delivered a fresh message to this recorder before START.
     auto still_missing = get_missing_topics(names_and_types);
     if (!still_missing.empty()) {
       std::ostringstream oss;
-      oss << "Recording will start without " << still_missing.size()
-          << " unavailable topics:";
+      oss << "Recording blocked; topics absent from ROS graph:";
       for (const auto & t : still_missing) {
         oss << " " << t;
       }
-      RCLCPP_WARN(this->get_logger(), "%s", oss.str().c_str());
+      throw std::runtime_error(oss.str());
+    }
+
+    std::vector<std::string> silent_topics;
+    for (int attempt = 0; attempt < 20; ++attempt) {
+      silent_topics.clear();
+      const auto now_ns = static_cast<uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+      for (const auto & topic : topics_to_record_) {
+        const auto it = per_topic_metrics_.find(topic);
+        const auto last_ns = it == per_topic_metrics_.end() ? 0ULL :
+          it->second->last_recv_ns.load(std::memory_order_relaxed);
+        if (last_ns == 0 || now_ns < last_ns ||
+          now_ns - last_ns > static_cast<uint64_t>(monitor_stall_window_ms_) * 1000000ULL) {
+          silent_topics.push_back(topic);
+        }
+      }
+      if (silent_topics.empty()) {
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (!silent_topics.empty()) {
+      std::ostringstream oss;
+      oss << "Recording blocked; no fresh messages received for:";
+      for (const auto & topic : silent_topics) {
+        oss << " " << topic;
+      }
+      throw std::runtime_error(oss.str());
     }
 
     // Open the bag writer.

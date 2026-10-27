@@ -72,6 +72,7 @@ class PreviewNode(Node):
     def __init__(self):
         super().__init__('camera_preview')
         self.declare_parameter('port', 7086)
+        self.declare_parameter('address', '0.0.0.0')
         self.cameras = {}
         self.cameras_lock = threading.Lock()
         self.create_timer(5.0, self.expire_subscriptions)
@@ -146,7 +147,8 @@ def handler_for(node):
 def main(args=None):
     rclpy.init(args=args)
     node = PreviewNode()
-    server = ThreadingHTTPServer(('0.0.0.0', node.get_parameter('port').value), handler_for(node))
+    server = ThreadingHTTPServer((node.get_parameter('address').value,
+                                 node.get_parameter('port').value), handler_for(node))
     server.daemon_threads = True
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()

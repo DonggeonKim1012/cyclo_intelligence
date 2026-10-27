@@ -69,6 +69,7 @@ class RosbagControl:
             )
 
     def is_available(self) -> bool:
+        self._service_available = self._send_command_client.service_is_ready()
         return self._service_available
 
     # ------------------------------------------------------------------
@@ -79,6 +80,7 @@ class RosbagControl:
         self._send_rosbag_command(
             command=SendCommand.Request.PREPARE,
             topics=topics,
+            wait_for_response=True,
         )
 
     def start_rosbag(
@@ -131,7 +133,7 @@ class RosbagControl:
 
     def shutdown(self) -> None:
         """Best-effort stop of any active recording before node shutdown."""
-        if not self._service_available:
+        if not self.is_available():
             return
         try:
             self.stop_rosbag(wait_for_response=False)
@@ -152,7 +154,7 @@ class RosbagControl:
         wait_for_response: bool = False,
         timeout_sec: float = _DEFAULT_REQUEST_TIMEOUT_SEC,
     ) -> None:
-        if not self._service_available:
+        if not self.is_available():
             self._node.get_logger().error(
                 f'Rosbag service unavailable — dropping command {command}')
             raise RuntimeError(f'{self.ROSBAG_SERVICE_NAME} not available')

@@ -36,6 +36,7 @@ def generate_launch_description():
     pkg_dir = get_package_share_directory('orchestrator')
     rosbridge_port = _env_int('CYCLO_ROSBRIDGE_PORT', '7090')
     web_video_server_port = _env_int('CYCLO_WEB_VIDEO_SERVER_PORT', '7085')
+    bind_address = os.environ.get('CYCLO_BIND_ADDRESS', '0.0.0.0')
 
     # Include orchestrator.launch.py
     orchestrator_launch = IncludeLaunchDescription(
@@ -57,6 +58,7 @@ def generate_launch_description():
             'default_call_service_timeout': 0.0,
             'call_services_in_new_thread': True,
             'port': rosbridge_port,
+            'address': bind_address,
         }],
     )
 
@@ -74,7 +76,9 @@ def generate_launch_description():
         executable='web_video_server',
         name='web_video_server',
         output='screen',
-        parameters=[{'port': web_video_server_port}]
+        respawn=True,
+        respawn_delay=2.0,
+        parameters=[{'port': web_video_server_port, 'address': bind_address}]
     )
 
     return LaunchDescription([
@@ -84,7 +88,8 @@ def generate_launch_description():
         web_video_server_node,
         Node(
             package='cyclo_data', executable='camera_preview_node',
-            name='camera_preview', output='screen',
-            parameters=[{'port': _env_int('CYCLO_CAMERA_PREVIEW_PORT', '7086')}],
+            name='camera_preview', output='screen', respawn=True, respawn_delay=2.0,
+            parameters=[{'port': _env_int('CYCLO_CAMERA_PREVIEW_PORT', '7086'),
+                         'address': bind_address}],
         ),
     ])

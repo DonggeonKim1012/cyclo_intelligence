@@ -517,7 +517,8 @@ class VideoFileServer:
         self,
         port: int = 8082,
         allowed_paths: Optional[list] = None,
-        replay_data_handler=None
+        replay_data_handler=None,
+        bind_address: str = '0.0.0.0',
     ):
         """
         Initialize VideoFileServer.
@@ -528,6 +529,7 @@ class VideoFileServer:
             replay_data_handler: ReplayDataHandler instance for serving replay data
         """
         self.port = port
+        self.bind_address = bind_address
         self.allowed_paths = allowed_paths or [str(Path.home())]
         self.replay_data_handler = replay_data_handler
         self.server: Optional[HTTPServer] = None
@@ -544,7 +546,7 @@ class VideoFileServer:
         VideoFileHandler.replay_data_handler = self.replay_data_handler
 
         try:
-            self.server = ThreadingHTTPServer(('0.0.0.0', self.port), VideoFileHandler)
+            self.server = ThreadingHTTPServer((self.bind_address, self.port), VideoFileHandler)
             self._running = True
 
             self.server_thread = threading.Thread(
