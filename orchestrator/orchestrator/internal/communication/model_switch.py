@@ -33,6 +33,7 @@ def intercept_model_switch_command(node, request, response):
                 SendCommand.Request.START_INFERENCE,
                 SendCommand.Request.RESUME_INFERENCE,
                 25,
+                getattr(SendCommand.Request, "LOAD_INFERENCE", 30),
             }):
         response.success = False
         response.message = 'Model switch was not confirmed; retry switching or Clear and reload'
@@ -72,6 +73,7 @@ def intercept_model_switch_command(node, request, response):
         SendCommand.Request.CANCEL,
         SendCommand.Request.UPDATE_INSTRUCTION,
         25,  # PREPARE_NEXT_CYCLE
+        getattr(SendCommand.Request, "LOAD_INFERENCE", 30),
         SWITCH_INFERENCE_MODEL_COMMAND,
         PRELOAD_INFERENCE_MODEL_COMMAND,
         CLEAR_PRELOADED_MODEL_COMMAND,

@@ -33,6 +33,8 @@ string inference_mode
 # "sync" uses ordered refill with the general look-ahead window, and
 # "sync_step" waits for each selected action to drain before the next request.
 string action_request_mode
+# Opt-in VLA-RAIL smoothing and chunk transitions for ordinary GR00T Async.
+bool vla_rail_enabled
 
 # Policy acceleration mode. Empty and "pytorch" mean the normal model path.
 # "tensorrt_dit" enables GR00T DiT-only TensorRT acceleration when supported.

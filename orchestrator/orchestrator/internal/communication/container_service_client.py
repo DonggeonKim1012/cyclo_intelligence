@@ -388,6 +388,7 @@ class ContainerServiceClient:
         task_instruction: str = "",
         publish_to_robot: bool = False,
         action_request_mode: str = "async",
+        vla_rail_enabled: bool = False,
         acceleration_mode: str = "",
         acceleration_engine_path: str = "",
         control_hz: int = 0,
@@ -420,7 +421,15 @@ class ContainerServiceClient:
         START/RESUME service discovery is capped at 5 s, making their default
         total wait at most 25 s versus the UI's 30 s service deadline.
         """
+        if vla_rail_enabled and (int(command) != self.CMD_LOAD or self._service_prefix != '/groot'
+                                 or action_request_mode != 'async'):
+            raise ValueError('VLA-RAIL requires ordinary GR00T Async LOAD')
         request = InferenceCommand.Request()
+        if vla_rail_enabled and not hasattr(request, 'vla_rail_enabled'):
+            raise RuntimeError('Rebuild interfaces to enable VLA-RAIL')
+        if hasattr(request, 'vla_rail_enabled'):
+            request.vla_rail_enabled = bool(vla_rail_enabled)
+
         request.command = int(command)
         request.model_path = model_path
         request.embodiment_tag = embodiment_tag

@@ -14,6 +14,8 @@ import threading
 import time
 from typing import List, Optional
 
+from .confirmed_hold import HOLD_CAPABILITY
+
 
 CMD_LOAD, CMD_START, CMD_PAUSE, CMD_RESUME, CMD_STOP, CMD_UNLOAD = 0, 1, 2, 3, 4, 5
 CMD_UPDATE_INSTRUCTION = 6
@@ -22,6 +24,8 @@ CMD_SWITCH_POLICY = 8
 CMD_PRELOAD_POLICY = 9
 CMD_CLEAR_PRELOAD = 10
 CMD_SWITCH_PRELOADED = 11
+CMD_CAPABILITIES = 12
+CMD_FAULT_STOP = 13
 
 
 class ServiceHandler:
@@ -45,10 +49,13 @@ class ServiceHandler:
             raise ValueError("real_start_deadline_s must be finite and positive")
         self._lifecycle_lock = threading.RLock()
         self._switch_failed = False
+        self._fault_latched = threading.Event()
 
     def handle(self, request):
         # Capture before waiting for the lifecycle lock so a queued Real
         # request cannot become valid again after its caller has timed out.
+        if int(request.command) == CMD_FAULT_STOP:
+            self._fault_latched.set()
         received_monotonic = time.monotonic()
         with self._lifecycle_lock:
             return self._handle_locked(request, received_monotonic)
@@ -56,6 +63,16 @@ class ServiceHandler:
     def _handle_locked(self, request, received_monotonic: float):
         cmd = int(request.command)
         try:
+            if cmd == CMD_CAPABILITIES:
+                return self._make_response(True, HOLD_CAPABILITY)
+            if self._fault_latched.is_set() and cmd in (
+                CMD_LOAD, CMD_START, CMD_RESUME, CMD_UPDATE_INSTRUCTION,
+                CMD_RESET_CYCLE, CMD_SWITCH_POLICY, CMD_SWITCH_PRELOADED,
+                CMD_PRELOAD_POLICY,
+            ):
+                return self._make_response(False, "supervision fault latched; restart policy runtime")
+            if cmd == CMD_FAULT_STOP:
+                return self._stop()
             if cmd == CMD_LOAD:
                 return self._load(request)
             if cmd == CMD_START:
@@ -93,26 +110,32 @@ class ServiceHandler:
             return self._make_response(False, response.message)
 
         action_keys = list(response.action_keys)
+        try:
+            self._control_loop.configure(
+                robot_type=request.robot_type,
+                task_instruction=request.task_instruction or "",
+                action_keys=action_keys,
+                publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
+                vla_rail_enabled=bool(getattr(request, "vla_rail_enabled", False)),
+                action_request_mode=self._effective_action_request_mode(request),
+                refill_margin_s=self._effective_refill_margin_s(request),
+                source_chunk_limit=self._effective_source_chunk_limit(request),
+                control_hz=getattr(request, "control_hz", 0),
+                inference_hz=getattr(request, "inference_hz", 0),
+                chunk_align_window_s=getattr(request, "chunk_align_window_s", 0.0),
+                initial_pose_sync=bool(getattr(request, "initial_pose_sync", False)),
+                initial_pose_sync_duration_s=(
+                    float(getattr(request, "initial_pose_sync_duration_s", 0.0)) or 5.0
+                ),
+            )
+        except Exception:
+            self._control_loop.deconfigure()
+            self._requester.unload_policy()
+            raise
         self._session.mark_loaded(
             robot_type=request.robot_type,
             task_instruction=request.task_instruction or "",
             action_keys=action_keys,
-        )
-        self._control_loop.configure(
-            robot_type=request.robot_type,
-            task_instruction=self._session.task_instruction,
-            action_keys=action_keys,
-            publish_to_robot=bool(getattr(request, "publish_to_robot", False)),
-            action_request_mode=self._effective_action_request_mode(request),
-            control_hz=getattr(request, "control_hz", 0),
-            inference_hz=getattr(request, "inference_hz", 0),
-            chunk_align_window_s=getattr(request, "chunk_align_window_s", 0.0),
-            initial_pose_sync=bool(getattr(request, "initial_pose_sync", False)),
-            initial_pose_sync_duration_s=(
-                float(getattr(request, "initial_pose_sync_duration_s", 0.0)) or 5.0
-            ),
-            refill_margin_s=self._effective_refill_margin_s(request),
-            source_chunk_limit=self._effective_source_chunk_limit(request),
         )
         self._switch_failed = False
         return self._make_response(True, response.message or "loaded", action_keys)
@@ -185,11 +208,23 @@ class ServiceHandler:
             raise ValueError("POLICY_SOURCE_CHUNK_LIMIT must be positive")
         return value
 
+    def _prepare_sync_options(self, request):
+        if getattr(request, "initial_pose_sync", False) or request.command == CMD_RESUME:
+            self._control_loop.set_initial_pose_sync(
+                bool(getattr(request, "initial_pose_sync", False)),
+                float(getattr(request, "initial_pose_sync_duration_s", 0.0)) or 5.0,
+            )
+
     def _start(self, request, received_monotonic: float):
         if self._switch_failed:
             raise RuntimeError("Model switch failed; retry switching or Clear and reload")
         if not self._session.loaded:
             raise RuntimeError("LOAD first")
+        instruction = str(getattr(request, "task_instruction", "") or "").strip()
+        if instruction:
+            self._session.task_instruction = instruction
+            self._control_loop.set_task_instruction(instruction)
+        self._prepare_sync_options(request)
         publish_to_robot = bool(getattr(request, "publish_to_robot", False))
         self._check_real_start_deadline(
             publish_to_robot,
@@ -221,8 +256,11 @@ class ServiceHandler:
     def _resume(self, request, received_monotonic: float):
         if self._switch_failed:
             raise RuntimeError("Model switch failed; retry switching or Clear and reload")
+        if not self._session.loaded:
+            raise RuntimeError("LOAD first")
         if not self._session.running:
-            raise RuntimeError("not running")
+            return self._start(request, received_monotonic)
+        self._prepare_sync_options(request)
         publish_to_robot = bool(getattr(request, "publish_to_robot", False))
         task_instruction = request.task_instruction or self._session.task_instruction
         self._check_real_start_deadline(
@@ -254,6 +292,7 @@ class ServiceHandler:
         if not self._session.paused:
             raise RuntimeError("RESET_CYCLE requires PAUSED")
 
+        self._prepare_sync_options(request)
         publish_to_robot = bool(getattr(request, "publish_to_robot", False))
         task_instruction = request.task_instruction or self._session.task_instruction
         self._check_real_start_deadline(

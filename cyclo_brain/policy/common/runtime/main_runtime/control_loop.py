@@ -9,10 +9,13 @@
 from __future__ import annotations
 
 import math
+import json
+import uuid
 import os
 import sys
 import threading
 import time
+from time import monotonic as trace_clock
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -34,6 +37,10 @@ from action_chunk_processing import ActionChunkProcessor  # noqa: E402
 from robot_client import RobotClient  # noqa: E402
 from .diagnostic_trace import DiagnosticTrace  # noqa: E402
 from .temporal_ensemble import TemporalActionEnsembler, limit_source_steps  # noqa: E402
+from .confirmed_hold import hold_current_pose
+from .latency_trace import AsyncLatencyTrace, BufferedActionTrace
+from .rail_execution import RailExecution
+from .rail_trajectory import validate_rail_keys
 
 
 try:  # pragma: no cover - SDK exists only in runtime container here.
@@ -132,6 +139,7 @@ class ControlLoop:
         real_action_blocked_callback: Optional[Callable[[str], None]] = None,
         temporal_ensemble_coeff: Optional[float] = None,
         temporal_ensemble_tail_fade_s: float = 0.2,
+        trace_path: Optional[str] = None,
     ) -> None:
         self._requester = requester
         self._default_inference_hz = positive_finite_or_default(inference_hz, 15.0)
@@ -332,6 +340,7 @@ class ControlLoop:
         self._real_action_blocked_callback = real_action_blocked_callback
 
         self._lock = threading.RLock()
+        self._hold_lock = threading.Lock()
         self._robot: Optional[RobotClient] = None
         self._processor: Optional[ActionChunkProcessor] = None
         self._task_instruction = ""
@@ -358,6 +367,10 @@ class ControlLoop:
         self._request_thread: Optional[threading.Thread] = None
         self._thread: Optional[threading.Thread] = None
         self._diagnostic_trace = DiagnosticTrace()
+        self._trace = AsyncLatencyTrace(trace_path)
+        self._buffer_trace = BufferedActionTrace(self._trace)
+        self._trace_request_count = 0
+        self._rail = None
 
     def configure(
         self,
@@ -366,6 +379,7 @@ class ControlLoop:
         action_keys: Optional[list[str]] = None,
         publish_to_robot: bool = False,
         action_request_mode: Optional[str] = None,
+        vla_rail_enabled: bool = False,
         control_hz: Optional[float] = None,
         inference_hz: Optional[float] = None,
         chunk_align_window_s: Optional[float] = None,
@@ -410,6 +424,17 @@ class ControlLoop:
                 and self._source_chunk_limit <= 0
             ):
                 raise ValueError("source_chunk_limit must be positive")
+            self._rail = None
+            if vla_rail_enabled:
+                if self._real_action_safety_enabled or self._temporal_ensemble is not None:
+                    raise ValueError("VLA-RAIL cannot replace the configured local safety/ensemble pipeline")
+                if self._action_request_mode != ACTION_REQUEST_MODE_ASYNC:
+                    raise ValueError("VLA-RAIL requires asynchronous action requests")
+                if self._target_chunk_size is not None:
+                    raise ValueError("VLA-RAIL requires the original policy horizon")
+                self._rail = RailExecution(
+                    self._requester, self._lock, self._trace, self._inference_hz
+                )
             self._robot = RobotClient(
                 robot_type,
                 enable_command_publishers=True,
@@ -440,6 +465,13 @@ class ControlLoop:
             # model-provided list separately so an empty Real contract cannot
             # be silently replaced by robot keys.
             self._action_keys = list(action_keys or self._robot.action_keys)
+            if self._rail:
+                try:
+                    validate_rail_keys(self._action_keys)
+                except ValueError:
+                    self._robot.close()
+                    self._robot = None
+                    raise
             self._publish_to_robot = bool(publish_to_robot)
             self._initial_pose_sync_enabled = bool(initial_pose_sync)
             self._initial_pose_sync_duration_s = duration_s
@@ -455,15 +487,18 @@ class ControlLoop:
             self._reset_real_tracking_hold_locked()
             self._reset_request_latency_locked()
             self._generation += 1
+            if self._rail:
+                self._rail.reset(self._inference_hz)
             config_message = (
                 "configured RobotClient command path for %s "
-                "(publish_to_robot=%s action_request_mode=%s "
+                "(publish_to_robot=%s action_request_mode=%s vla_rail=%s "
                 "control_hz=%g inference_hz=%g chunk_align_window_s=%g "
                 "initial_pose_sync=%s initial_pose_sync_duration_s=%g)"
                 % (
                     robot_type,
                     self._publish_to_robot,
                     self._action_request_mode,
+                    self._rail is not None,
                     self._control_hz,
                     self._inference_hz,
                     self._chunk_align_window_s,
@@ -502,12 +537,16 @@ class ControlLoop:
             self._initial_pose_sync_source_chunk_size = 0
             self._processor = None
             self._generation += 1
+            if self._rail:
+                self._rail.reset(self._inference_hz)
             if self._robot is not None:
                 self._robot.close()
                 self._robot = None
             self._reset_request_latency_locked()
 
-    def start(self, publish_to_robot: Optional[bool] = None) -> bool:
+    def start(self, publish_to_robot: Optional[bool] = None, *,
+              initial_pose_sync: Optional[bool] = None,
+              initial_pose_sync_duration_s: float = 5.0) -> bool:
         with self._lock:
             if self._initial_pose_sync_hold_pending:
                 raise RuntimeError(
@@ -526,6 +565,13 @@ class ControlLoop:
                     self._robot,
                     self._real_contract_action_keys_locked(),
                 )
+            if initial_pose_sync is not None and not self._running:
+                duration = float(initial_pose_sync_duration_s)
+                if not 1.0 <= duration <= 60.0:
+                    raise ValueError('initial_pose_sync_duration_s must be between 1 and 60')
+                self._initial_pose_sync_enabled = bool(initial_pose_sync)
+                self._initial_pose_sync_duration_s = duration
+                self._initial_pose_sync_completed = False
             if publish_to_robot is not None:
                 self._set_publish_to_robot_locked(bool(publish_to_robot))
             should_sync = (
@@ -557,6 +603,9 @@ class ControlLoop:
             self._running = False
             self._initial_pose_sync_in_progress = False
             self._initial_pose_sync_deadline = None
+            request_id = uuid.uuid4().hex
+            cold_start = self._trace_request_count == 0
+            self._trace_request_count += 1
 
         if sync_action is None:
             if self._real_action_safety_enabled:
@@ -564,14 +613,31 @@ class ControlLoop:
                     "initial pose sync requires a completed Real safety preflight"
                 )
             started_at = time.monotonic()
-            response = self._requester.get_action(task_instruction)
-            latency_s = time.monotonic() - started_at
-            self._record_request_latency(latency_s)
-            chunk = self._action_chunk_from_response(
-                response,
-                robot,
-                action_keys,
-            )
+            self._trace.emit("request_started", request_id=request_id, generation=generation,
+                             purpose="initial_pose_sync")
+            timing = {}
+            status = "ok"
+            try:
+                response = self._requester.get_action(task_instruction)
+                try:
+                    timing = json.loads(getattr(response, "timing_json", "") or "{}")
+                    if not isinstance(timing, dict):
+                        timing = {}
+                except (ValueError, TypeError):
+                    timing = {}
+                if not response.success:
+                    status = "timeout" if timing.get("status") == "timeout" else "error"
+                chunk = self._action_chunk_from_response(response, robot, action_keys)
+            except Exception as exc:
+                if status == "ok":
+                    status = "timeout" if isinstance(exc, TimeoutError) else "error"
+                raise
+            finally:
+                latency_s = time.monotonic() - started_at
+                self._record_request_latency(latency_s)
+                self._trace.emit("request_completed", request_id=request_id, generation=generation,
+                                 latency_s=latency_s, cold_start=cold_start, success=status == "ok",
+                                 status=status, timing=timing, purpose="initial_pose_sync")
             sync_action = chunk[0]
             source_chunk_size = len(chunk)
 
@@ -583,6 +649,7 @@ class ControlLoop:
             ):
                 raise RuntimeError("initial pose sync cancelled")
             processor.clear()
+            self._buffer_trace.reset(time.monotonic())
             try:
                 robot.publish_initial_pose_sync(
                     sync_action,
@@ -611,6 +678,16 @@ class ControlLoop:
                 source_chunk_size,
             )
             return True
+
+    def set_initial_pose_sync(self, enabled, duration_s):
+        duration = float(duration_s)
+        if not math.isfinite(duration) or not 1.0 <= duration <= 60.0:
+            raise ValueError("initial_pose_sync_duration_s must be between 1 and 60")
+        with self._lock:
+            if not self._running:
+                self._initial_pose_sync_enabled = bool(enabled)
+                self._initial_pose_sync_duration_s = duration
+                self._initial_pose_sync_completed = False
 
     def preflight_start(
         self,
@@ -769,16 +846,20 @@ class ControlLoop:
             produced,
         )
 
-    def pause(self) -> bool:
+    def pause(self, *, expected_generation: Optional[int] = None) -> bool:
+        # Serialize the entire hold transaction, not only its state mutation.
+        # A delayed auto-hold must settle before an explicit STOP acknowledges.
+        with self._hold_lock:
+            return self._pause_serialized(expected_generation=expected_generation)
+
+    def _pause_serialized(self, *, expected_generation: Optional[int] = None) -> bool:
         robot = None
         action_keys: list[str] = []
         with self._lock:
+            if expected_generation is not None and expected_generation != self._generation:
+                return False
             should_hold = (
-                (
-                    self._initial_pose_sync_in_progress
-                    or self._initial_pose_sync_hold_pending
-                )
-                and self._publish_to_robot
+                self._publish_to_robot
                 and self._robot is not None
             )
             if should_hold:
@@ -787,6 +868,7 @@ class ControlLoop:
             self._running = False
             if self._processor is not None:
                 self._processor.clear()
+                self._buffer_trace.reset(time.monotonic())
             self._initial_pose_sync_deadline = None
             self._reset_temporal_ensemble_locked()
             self._initial_pose_sync_action = None
@@ -796,6 +878,8 @@ class ControlLoop:
             self._real_last_published_action = None
             self._reset_real_tracking_hold_locked()
             self._generation += 1
+            if self._rail:
+                self._rail.reset(self._inference_hz)
             if should_hold:
                 self._initial_pose_sync_hold_pending = True
             else:
@@ -803,14 +887,14 @@ class ControlLoop:
                 self._initial_pose_sync_hold_pending = False
         if robot is not None:
             try:
-                robot.publish_current_pose_hold(action_keys, duration_s=0.1)
-                logger.info("initial pose sync interrupted; current pose hold published")
+                hold_current_pose(robot, action_keys)
+                logger.info("policy output paused; current pose hold confirmed")
             except Exception as e:
                 with self._lock:
                     if robot is self._robot:
                         self._initial_pose_sync_in_progress = True
                         self._initial_pose_sync_hold_pending = True
-                logger.error("failed to hold current pose during sync pause: %s", e)
+                logger.error("failed to confirm current pose hold: %s", e)
                 return False
             with self._lock:
                 if robot is not self._robot:
@@ -843,15 +927,22 @@ class ControlLoop:
         self._initial_pose_sync_source_chunk_size = 0
         if self._processor is not None:
             self._processor.clear()
+            self._buffer_trace.reset(time.monotonic())
         self._real_first_action_pending = True
         self._real_first_publish_pending = True
         self._real_last_published_action = None
         self._reset_real_tracking_hold_locked()
         self._generation += 1
+        if self._rail:
+            self._rail.reset(self._inference_hz)
 
     def set_task_instruction(self, task_instruction: str) -> None:
         with self._lock:
-            self._task_instruction = task_instruction or ""
+            updated = task_instruction or ""
+            if self._rail and updated != self._task_instruction:
+                self._generation += 1
+                self._rail.reset(self._inference_hz)
+            self._task_instruction = updated
 
     def run_background(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -877,6 +968,7 @@ class ControlLoop:
             self._thread.join(timeout=2.0)
         self.deconfigure()
         self._diagnostic_trace.close()
+        self._trace.close()
 
     def tick(self) -> None:
         with self._lock:
@@ -911,7 +1003,13 @@ class ControlLoop:
                     "initial pose sync complete; requesting a fresh action chunk"
                 )
 
-            action = processor.pop_action()
+            executor = self._rail
+            if executor:
+                action_sample_time = time.monotonic()
+                action = executor.tick(action_sample_time, task_instruction, action_keys, generation)
+            else:
+                action = processor.pop_action()
+                self._buffer_trace.popped(action is not None, trace_clock(), generation)
             if action is not None:
                 desired_action = np.asarray(
                     action,
@@ -987,6 +1085,11 @@ class ControlLoop:
                                 )
                         if self._real_first_publish_pending:
                             self._real_first_publish_pending = False
+                        if executor:
+                            executor.record_command(action_sample_time, generation,
+                                                       published_at=time.monotonic(), action=action)
+                        else:
+                            self._buffer_trace.published()
                     except Exception as e:
                         if real_publish_guard:
                             self._reject_action_chunk_locked(
@@ -994,6 +1097,12 @@ class ControlLoop:
                             )
                         else:
                             logger.error("failed to publish robot action: %s", e)
+                        if executor:
+                            self._running = False
+                            self._initial_pose_sync_hold_pending = True
+                            self._trace.emit("command_publish_failed", generation=generation, error=str(e))
+                            threading.Thread(target=self.pause, kwargs={"expected_generation": generation}, daemon=True).start()
+                            return
             elif publish_to_robot:
                 self._diagnostic_trace.record('buffer_empty', generation=generation)
                 idle = getattr(robot, "publish_idle_action", None)
@@ -1008,7 +1117,7 @@ class ControlLoop:
                         else:
                             logger.error("failed to publish idle robot action: %s", e)
 
-            should_request = self._running and self._should_request_actions(processor)
+            should_request = self._running and not executor and self._should_request_actions(processor)
 
         if should_request:
             self._request_thread = threading.Thread(
@@ -1026,15 +1135,30 @@ class ControlLoop:
     ) -> None:
         action_request_mode = normalize_action_request_mode(action_request_mode)
         started_at = time.monotonic()
+        request_id = uuid.uuid4().hex
+        cold_start = self._trace_request_count == 0
+        self._trace_request_count += 1
+        self._trace.emit("request_started", request_id=request_id, generation=generation)
         try:
             response = self._requester.get_action(task_instruction)
         except Exception as e:
             latency_s = time.monotonic() - started_at
             self._record_request_latency(latency_s)
             self._reject_action_chunk(f"get_action raised: {e}", generation)
+            self._trace.emit("request_completed", request_id=request_id, generation=generation,
+                             latency_s=latency_s, cold_start=cold_start, success=False,
+                             status="timeout" if isinstance(e, TimeoutError) else "error")
+            logger.warning("get_action raised: %s", e)
             return
         latency_s = time.monotonic() - started_at
         self._record_request_latency(latency_s)
+        try:
+            timing = json.loads(getattr(response, "timing_json", "") or "{}")
+        except (ValueError, TypeError):
+            timing = {}
+        self._trace.emit("request_completed", request_id=request_id, generation=generation,
+                         latency_s=latency_s, cold_start=cold_start, success=bool(response.success),
+                         status="ok" if response.success else timing.get("status", "error"), timing=timing)
         try:
             with self._lock:
                 robot = self._robot
@@ -1140,10 +1264,18 @@ class ControlLoop:
                     }
                     else latency_s + buffer_delay_s
                 )
+                postprocess_started = trace_clock()
                 produced = self._processor.push_actions(
                     chunk,
                     scheduled_start_delay_s=scheduled_start_delay_s,
                     align=(action_request_mode == ACTION_REQUEST_MODE_ASYNC),
+                )
+                self._buffer_trace.installed(
+                    request_id, generation, buffer_before, produced,
+                    policy_dt_s=1.0 / self._inference_hz,
+                    control_dt_s=1.0 / self._processor.output_hz,
+                    arrival_monotonic_s=started_at + latency_s,
+                    runtime_postprocess_s=trace_clock() - postprocess_started,
                 )
                 buffer_after = self._processor.buffer_size
                 if self._diagnostic_trace.enabled:
@@ -1623,10 +1755,12 @@ class ControlLoop:
     def _reset_request_latency_locked(self) -> None:
         self._request_latency_ema_s = None
         self._latency_warmup_remaining = self._latency_warmup_samples
+        self._trace_request_count = 0
+        self._buffer_trace.reset(time.monotonic())
 
     def _tick_period(self) -> float:
         with self._lock:
-            if self._processor is None:
+            if self._processor is None or self._rail is not None:
                 hz = self._control_hz
             else:
                 hz = self._processor.output_hz

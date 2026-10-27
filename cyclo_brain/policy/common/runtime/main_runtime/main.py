@@ -252,6 +252,7 @@ class MainRuntime:
             temporal_ensemble_coeff=self._temporal_ensemble_coefficient_env(),
             temporal_ensemble_tail_fade_s=float(os.environ.get(
                 'POLICY_TEMPORAL_ENSEMBLE_TAIL_FADE_S', '0.2')),
+            trace_path=os.environ.get("INFERENCE_TRACE_PATH"),
         )
         logger.info('Policy temporal ensemble: coefficient=%s (none=disabled) tail_fade_s=%s',
                     os.environ.get('POLICY_TEMPORAL_ENSEMBLE_COEFF', 'none'),

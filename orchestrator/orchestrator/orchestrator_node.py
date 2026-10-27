@@ -60,6 +60,7 @@ from orchestrator.internal.communication.joystick_controls import (
     ARM_TOGGLE_TRIGGERS,
     RECORD_CANCEL_ACTION,
     RECORD_TOGGLE_ACTION,
+    SH5_RECORDING_PROFILES,
     get_joystick_recording_action,
 )
 from orchestrator.internal.communication.cyclo_data_client import CycloDataClient
@@ -233,6 +234,7 @@ class OrchestratorNode(Node):
         self._loaded_inference_acceleration_mode: str = 'pytorch'
         self._loaded_inference_acceleration_engine_path: str = ''
         self._loaded_inference_action_request_mode: str = 'async'
+        self._loaded_inference_vla_rail_enabled = False
         self._loaded_inference_control_hz: int = 100
         self._loaded_inference_inference_hz: int = 15
         self._loaded_inference_chunk_align_window_s: float = 0.3
@@ -451,6 +453,11 @@ class OrchestratorNode(Node):
             if isinstance(value, list):
                 value = list(value)
             setattr(copied, field_name, value)
+        rail = bool(getattr(task_info, 'vla_rail_enabled', False))
+        if rail and not hasattr(copied, 'vla_rail_enabled'):
+            raise RuntimeError('Rebuild interfaces to enable VLA-RAIL')
+        if hasattr(copied, 'vla_rail_enabled'):
+            copied.vla_rail_enabled = rail
         return copied
 
     def _infer_conversion_robot_type(self, roots):
@@ -551,7 +558,8 @@ class OrchestratorNode(Node):
             self.video_server = VideoFileServer(
                 port=self.VIDEO_SERVER_PORT,
                 allowed_paths=allowed_paths,
-                replay_data_handler=self.replay_data_handler
+                replay_data_handler=self.replay_data_handler,
+                bind_address=os.environ.get('CYCLO_BIND_ADDRESS', '0.0.0.0'),
             )
             self.video_server.start()
             self.get_logger().info(
@@ -1282,6 +1290,7 @@ class OrchestratorNode(Node):
             SendCommand.Request.RESUME_INFERENCE,
             SendCommand.Request.STOP_INFERENCE,
             PREPARE_NEXT_CYCLE_COMMAND,
+            getattr(SendCommand.Request, "LOAD_INFERENCE", 30),
         }:
             with self._inference_lifecycle_lock:
                 return self._user_interaction_callback(request, response)
@@ -1303,6 +1312,7 @@ class OrchestratorNode(Node):
             if request.command in {
                 SendCommand.Request.START_INFERENCE,
                 SendCommand.Request.RESUME_INFERENCE,
+                getattr(SendCommand.Request, "LOAD_INFERENCE", 30),
             }:
                 with self._state_lock:
                     cycle_pending = self._inference_cycle_prepared
@@ -1532,7 +1542,15 @@ class OrchestratorNode(Node):
                         self._trigger_record_next_segment_index = int(request.segment_index)
                 self._apply_cyclo_data_response(cd_result, response)
 
-            elif request.command == SendCommand.Request.START_INFERENCE:
+            elif request.command in (
+                SendCommand.Request.START_INFERENCE,
+                getattr(SendCommand.Request, 'LOAD_INFERENCE', 30),
+            ):
+                # LOAD is a preparation operation. It must never briefly
+                # start a policy just to manufacture a paused session.
+                load_only = request.command == getattr(
+                    SendCommand.Request, 'LOAD_INFERENCE', 30
+                )
                 task_info = request.task_info
                 try:
                     requested_publish_to_robot = (
@@ -1546,7 +1564,9 @@ class OrchestratorNode(Node):
                 # Only an explicit Robot request may enable robot publishing;
                 # absent legacy mode metadata defaults safely to Simulation.
                 publish_to_robot = bool(requested_publish_to_robot)
-                self._cache_ui_task_info(task_info, 'START_INFERENCE')
+                self._cache_ui_task_info(
+                    task_info, 'LOAD_INFERENCE' if load_only else 'START_INFERENCE'
+                )
 
                 task_instruction = (
                     task_info.task_instruction[0]
@@ -1557,6 +1577,7 @@ class OrchestratorNode(Node):
                 requested_acceleration_mode, requested_acceleration_engine_path = (
                     self._acceleration_from_task_info(task_info)
                 )
+                requested_vla_rail_enabled = bool(getattr(task_info, "vla_rail_enabled", False))
                 requested_action_request_mode = (
                     self._action_request_mode_from_task_info(task_info)
                 )
@@ -1595,6 +1616,7 @@ class OrchestratorNode(Node):
                     loaded_acceleration_engine_path = (
                         self._loaded_inference_acceleration_engine_path
                     )
+                    loaded_vla_rail_enabled = getattr(self, "_loaded_inference_vla_rail_enabled", False)
                     loaded_action_request_mode = (
                         self._loaded_inference_action_request_mode
                     )
@@ -1611,7 +1633,8 @@ class OrchestratorNode(Node):
                     )
                 start_handled = False
                 if (
-                    existing_client is not None
+                    not load_only
+                    and existing_client is not None
                     and existing_client._service_prefix == service_prefix
                 ):
                     with self._state_lock:
@@ -1626,6 +1649,7 @@ class OrchestratorNode(Node):
                         loaded_chunk_align_window_s,
                         loaded_initial_pose_sync,
                         loaded_initial_pose_sync_duration_s,
+                        vla_rail_enabled=loaded_vla_rail_enabled,
                     )
                     requested_signature = inference_runtime_signature(
                         requested_policy_path,
@@ -1637,6 +1661,7 @@ class OrchestratorNode(Node):
                         requested_chunk_align_window_s,
                         requested_initial_pose_sync,
                         requested_initial_pose_sync_duration_s,
+                        vla_rail_enabled=requested_vla_rail_enabled,
                     )
                     if (
                         requested_policy_path
@@ -1738,15 +1763,19 @@ class OrchestratorNode(Node):
                     # TRT engine build), which would block the SendCommand
                     # srv well past any reasonable UI timeout. So we set up
                     # state synchronously (cheap), publish phase=LOADING,
-                    # kick off LOAD → START on a daemon thread, and return
+                    # kick off LOAD (and START only when explicitly requested)
+                    # on a daemon thread, and return
                     # success=True immediately. UI tracks progress via the
                     # /task/inference_status topic (LOADING → INFERENCING,
                     # or READY+error on failure). Mirrors the
                     # Container start pattern used across policy backends.
                     with self._state_lock:
                         existing_client = self.container_service_client
+                    cleanup_thread = None
                     if existing_client is not None:
-                        self._teardown_inference_client()
+                        cleanup_thread = self._teardown_inference_client(
+                            require_confirmed_stop=load_only,
+                        )
 
                     self.init_robot_control_parameters_from_user_task(task_info)
 
@@ -1770,8 +1799,20 @@ class OrchestratorNode(Node):
                     normalized_model_path = requested_policy_path
                     robot_type = self.robot_type
 
-                    def _load_and_start():
+                    def _load_policy_session():
                         try:
+                            # A previous client's cleanup addresses the same
+                            # backend service. Drain it before loading so a late
+                            # UNLOAD cannot erase the new idle session.
+                            if cleanup_thread is not None:
+                                cleanup_thread.join()
+                                if getattr(cleanup_thread, 'lifecycle_errors', []):
+                                    self._publish_inference_phase(
+                                        InferenceStatus.READY,
+                                        error=cleanup_thread.lifecycle_errors[0],
+                                    )
+                                    return
+
                             def _call_load():
                                 return client.inference_command(
                                     ContainerServiceClient.CMD_LOAD,
@@ -1785,6 +1826,7 @@ class OrchestratorNode(Node):
                                         requested_acceleration_engine_path
                                     ),
                                     action_request_mode=requested_action_request_mode,
+                                    vla_rail_enabled=requested_vla_rail_enabled,
                                     control_hz=requested_control_hz,
                                     inference_hz=requested_inference_hz,
                                     chunk_align_window_s=(
@@ -1799,6 +1841,30 @@ class OrchestratorNode(Node):
                             with self._inference_lifecycle_lock:
                                 with self._state_lock:
                                     if self.container_service_client is not client:
+                                        return
+
+                                if load_only:
+                                    # Match supervised LOAD: settle the resident
+                                    # policy first, then load without START.
+                                    stop_result = client.inference_command(
+                                        ContainerServiceClient.CMD_STOP
+                                    )
+                                    if not stop_result.success:
+                                        self._publish_inference_phase(
+                                            InferenceStatus.READY,
+                                            error='STOP before LOAD failed: '
+                                            f'{stop_result.message}',
+                                        )
+                                        return
+                                    unload_result = client.inference_command(
+                                        ContainerServiceClient.CMD_UNLOAD
+                                    )
+                                    if not unload_result.success:
+                                        self._publish_inference_phase(
+                                            InferenceStatus.READY,
+                                            error='UNLOAD before LOAD failed: '
+                                            f'{unload_result.message}',
+                                        )
                                         return
 
                                 load_result = _call_load()
@@ -1853,22 +1919,24 @@ class OrchestratorNode(Node):
                                     f'LOAD ok action_keys={action_keys}'
                                 )
 
-                                start_result = client.inference_command(
-                                    ContainerServiceClient.CMD_START,
-                                    publish_to_robot=publish_to_robot,
-                                )
-                                if not start_result.success:
-                                    self.get_logger().error(
-                                        f'Async START failed: {start_result.message}'
+                                start_result = None
+                                if not load_only:
+                                    start_result = client.inference_command(
+                                        ContainerServiceClient.CMD_START,
+                                        publish_to_robot=publish_to_robot,
                                     )
-                                    self._teardown_inference_client(
-                                        expected_client=client
-                                    )
-                                    self._publish_inference_phase(
-                                        InferenceStatus.READY,
-                                        error=start_result.message,
-                                    )
-                                    return
+                                    if not start_result.success:
+                                        self.get_logger().error(
+                                            f'Async START failed: {start_result.message}'
+                                        )
+                                        self._teardown_inference_client(
+                                            expected_client=client
+                                        )
+                                        self._publish_inference_phase(
+                                            InferenceStatus.READY,
+                                            error=start_result.message,
+                                        )
+                                        return
 
                                 with self._state_lock:
                                     if self.container_service_client is not client:
@@ -1886,6 +1954,7 @@ class OrchestratorNode(Node):
                                     self._loaded_inference_acceleration_engine_path = (
                                         requested_acceleration_engine_path
                                     )
+                                    self._loaded_inference_vla_rail_enabled = requested_vla_rail_enabled
                                     self._loaded_inference_action_request_mode = (
                                         requested_action_request_mode
                                     )
@@ -1908,9 +1977,11 @@ class OrchestratorNode(Node):
 
                                 self._set_session_active(
                                     on_inference=True,
-                                    start_time=time.perf_counter(),
+                                    start_time=None if load_only else time.perf_counter(),
                                 )
-                                if (
+                                if load_only:
+                                    self._publish_inference_phase(InferenceStatus.PAUSED)
+                                elif (
                                     (start_result.message or '').strip().lower()
                                     == 'syncing'
                                 ):
@@ -1937,7 +2008,7 @@ class OrchestratorNode(Node):
                                 pass
 
                     threading.Thread(
-                        target=_load_and_start,
+                        target=_load_policy_session,
                         daemon=True,
                         name=f'inference-load-{service_prefix.strip("/")}',
                     ).start()
@@ -2242,12 +2313,15 @@ class OrchestratorNode(Node):
                                 if task_info.task_instruction
                                 else ''
                             )
+                            resume_sync, resume_sync_duration = self._initial_pose_sync_from_task_info(request.task_info)
                             result = client.inference_command(
                                 (
                                     ContainerServiceClient.CMD_RESET_CYCLE
                                     if cycle_prepared
                                     else ContainerServiceClient.CMD_RESUME
                                 ),
+                                initial_pose_sync=resume_sync,
+                                initial_pose_sync_duration_s=resume_sync_duration,
                                 task_instruction=task_instruction,
                                 publish_to_robot=resume_publish_to_robot,
                             )
@@ -2270,9 +2344,12 @@ class OrchestratorNode(Node):
                                     == 'syncing'
                                 )
                                 if needs_initial_pose_sync:
+                                    with self._state_lock:
+                                        self._loaded_inference_initial_pose_sync = True
+                                        self._loaded_inference_initial_pose_sync_duration_s = resume_sync_duration
                                     self._begin_initial_pose_sync_status(
                                         client,
-                                        loaded_initial_pose_sync_duration_s,
+                                        resume_sync_duration if resume_sync else loaded_initial_pose_sync_duration_s,
                                     )
                                 else:
                                     self._publish_inference_phase(
@@ -2852,7 +2929,7 @@ class OrchestratorNode(Node):
                 response.start_time = result.get('start_time', 0.0)
                 response.end_time = result.get('end_time', 0.0)
                 response.duration = result.get('duration', 0.0)
-                response.video_server_port = self.VIDEO_SERVER_PORT
+                response.video_server_port = _env_int('CYCLO_VIDEO_PUBLIC_PORT', str(self.VIDEO_SERVER_PORT))
                 response.bag_path = bag_path
 
             return response
@@ -3151,6 +3228,7 @@ class OrchestratorNode(Node):
             self._loaded_inference_acceleration_mode = 'pytorch'
             self._loaded_inference_acceleration_engine_path = ''
             self._loaded_inference_action_request_mode = 'async'
+            self._loaded_inference_vla_rail_enabled = False
             self._loaded_inference_control_hz = 100
             self._loaded_inference_inference_hz = 15
             self._loaded_inference_chunk_align_window_s = 0.3
@@ -3192,6 +3270,7 @@ class OrchestratorNode(Node):
         self,
         expected_client=None,
         stop_verified_client=None,
+        require_confirmed_stop=False,
     ):
         """Tear down the container service client (STOP + UNLOAD + disconnect).
 
@@ -3246,6 +3325,7 @@ class OrchestratorNode(Node):
             self._loaded_inference_acceleration_mode = 'pytorch'
             self._loaded_inference_acceleration_engine_path = ''
             self._loaded_inference_action_request_mode = 'async'
+            self._loaded_inference_vla_rail_enabled = False
             self._loaded_inference_control_hz = 100
             self._loaded_inference_inference_hz = 15
             self._loaded_inference_chunk_align_window_s = 0.3
@@ -3258,13 +3338,21 @@ class OrchestratorNode(Node):
         if client is None:
             return
 
+        cleanup_errors = []
+
         def _cleanup():
             try:
                 with self._inference_lifecycle_lock:
                     if not stop_verified:
-                        client.inference_command(ContainerServiceClient.CMD_STOP)
+                        stop_result = client.inference_command(ContainerServiceClient.CMD_STOP)
+                        if require_confirmed_stop and not stop_result.success:
+                            raise RuntimeError(
+                                'STOP before LOAD failed: '
+                                f'{stop_result.message or "hold not confirmed"}'
+                            )
                     client.inference_command(ContainerServiceClient.CMD_UNLOAD)
             except Exception as e:
+                cleanup_errors.append(str(e))
                 self.get_logger().error(f'Error tearing down inference: {e}')
             finally:
                 try:
@@ -3273,7 +3361,10 @@ class OrchestratorNode(Node):
                 except Exception:
                     pass
 
-        threading.Thread(target=_cleanup, daemon=True).start()
+        cleanup_thread = threading.Thread(target=_cleanup, daemon=True)
+        cleanup_thread.lifecycle_errors = cleanup_errors
+        cleanup_thread.start()
+        return cleanup_thread
 
     def _record_trigger_total_segments(self) -> int:
         task_info = self._prepared_record_task_info
@@ -3489,7 +3580,7 @@ class OrchestratorNode(Node):
         Handle leader tact triggers as backend-owned recording controls.
 
         Legacy robots keep right/left short-click recording controls. Only
-        the explicitly advertised LG2 mini + SH5 profile uses long presses.
+        explicitly advertised LG2 mini + SH5 and A3 + SH5 profiles use long presses.
         """
         self.get_logger().info(f'Joystick trigger: {joystick_mode}')
 
@@ -3502,9 +3593,9 @@ class OrchestratorNode(Node):
                            if self.robot_type == 'ffw_sh5_rev1' else '')
         recording_action = get_joystick_recording_action(joystick_mode, control_profile)
         if recording_action is None:
-            if control_profile == 'lg2_mini_sh5_recording' and joystick_mode in ARM_TOGGLE_TRIGGERS:
+            if control_profile in SH5_RECORDING_PROFILES and joystick_mode in ARM_TOGGLE_TRIGGERS:
                 self.get_logger().debug(
-                    f'Short {joystick_mode} click reserved for mini-leader '
+                    f'Short {joystick_mode} click reserved for SH5 leader '
                     'arm enable/disable; no recording action')
             else:
                 self.get_logger().info(

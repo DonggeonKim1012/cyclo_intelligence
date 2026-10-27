@@ -47,6 +47,10 @@ uint8 PRELOAD_INFERENCE_MODEL = 27
 uint8 CLEAR_PRELOADED_MODEL = 28
 # Requires a matching preloaded model; never falls back to disk loading.
 uint8 SWITCH_PRELOADED_MODEL = 29
+# LOAD_INFERENCE: prepare a policy session and remain idle. Unlike
+# START_INFERENCE, this never starts action generation or robot publication.
+# RESUME_INFERENCE explicitly starts the prepared session.
+uint8 LOAD_INFERENCE = 30
 
 uint8 command
 TaskInfo task_info

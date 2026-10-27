@@ -53,6 +53,7 @@ string[] action_keys
 int32 chunk_size
 int32 action_dim
 float64[] action_list
+string timing_json
 """
 
 
@@ -77,6 +78,7 @@ class EngineCommandResponse:
     chunk_size: int = 0
     action_dim: int = 0
     action_list: List[float] = field(default_factory=list)
+    timing_json: str = ""
 
 
 def request_from_message(message: Any) -> EngineCommandRequest:
@@ -107,6 +109,7 @@ def response_from_message(message: Any) -> EngineCommandResponse:
         chunk_size=int(getattr(message, "chunk_size", 0)),
         action_dim=int(getattr(message, "action_dim", 0)),
         action_list=[float(v) for v in list(action_list)] if action_list is not None else [],
+        timing_json=str(getattr(message, "timing_json", "") or ""),
     )
 
 
@@ -120,6 +123,7 @@ def response_to_message_kwargs(response: EngineCommandResponse) -> dict:
         "chunk_size": int(response.chunk_size),
         "action_dim": int(response.action_dim),
         "action_list": np.asarray(response.action_list, dtype=np.float64),
+        "timing_json": str(response.timing_json),
     }
 
 

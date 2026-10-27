@@ -30,6 +30,10 @@ uint8 PRELOAD_POLICY     = 9   # Only before START or while PAUSED.
 uint8 CLEAR_PRELOAD      = 10
 uint8 SWITCH_PRELOADED   = 11  # PAUSED; no fallback to loading.
 
+# Runtime extensions, sent as numeric command values without changing ROSIDL:
+# 12: CAPABILITIES, read-only; confirmed_pose_hold_v2 advertises confirmed STOP
+#    and fault latch support.
+# 13: FAULT_STOP, confirmed hold + permanent START/LOAD lockout until Main restart.
 uint8 command
 
 # LOAD fields — required when command = LOAD, "" otherwise.
@@ -49,6 +53,8 @@ bool publish_to_robot
 # response order with the general bounded look-ahead window. "sync_step"
 # waits for each selected source action to drain before the next request.
 string action_request_mode
+# Opt-in VLA-RAIL smoothing and chunk transitions for ordinary GR00T Async.
+bool vla_rail_enabled
 # Runtime acceleration selected at LOAD time. Empty / "pytorch" means normal
 # PyTorch inference. "tensorrt_dit" enables GR00T DiT-only TensorRT when
 # supported by the backend.
